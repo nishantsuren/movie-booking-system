@@ -6,11 +6,12 @@ Phase 2. Customer browse + admin CRUD per Appendix A/C, plus
 city-scoped theatre discovery at this phase (showtimes, the more natural
 discovery path, don't exist until Phase 3).
 """
+import hashlib
 import os
 from typing import Optional
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from db import get_db
@@ -48,11 +49,12 @@ class ScreenUpdate(BaseModel):
     name: Optional[str] = None
 
 
-def _require_idempotency_key(request: Request) -> str:
-    key = request.headers.get("idempotency-key")
-    if not key:
-        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
-    return key
+def _derive_idempotency_key(*parts: object) -> str:
+    """Deterministic dedup key derived from a create request's
+    identity-defining fields (§11.1) -- see catalog/main.py's version of
+    this helper for the full rationale and accepted trade-off."""
+    normalized = "|".join(str(p).strip().lower() for p in parts)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _get_theatre_or_404(conn, theatre_id: UUID) -> dict:
@@ -90,16 +92,15 @@ def get_theatre(theatre_id: UUID, conn=Depends(get_db)) -> dict:
 @app.post("/admin/theatres", status_code=201)
 def create_theatre(
     body: TheatreCreate,
-    request: Request,
     conn=Depends(get_db),
     _ctx: AuthContext = Depends(require_role("ADMIN")),
 ) -> dict:
-    idempotency_key = _require_idempotency_key(request)
     with conn.cursor() as cur:
         cur.execute("SELECT id FROM city WHERE id = %s", (str(body.city_id),))
         if cur.fetchone() is None:
             raise HTTPException(status_code=404, detail="city not found")
 
+    idempotency_key = _derive_idempotency_key(body.city_id, body.name)
     writer = IdempotentWriter(conn)
     row, _created = writer.insert_or_get(
         "theatre",
@@ -141,12 +142,11 @@ def update_theatre(
 def create_screen(
     theatre_id: UUID,
     body: ScreenCreate,
-    request: Request,
     conn=Depends(get_db),
     _ctx: AuthContext = Depends(require_role("ADMIN")),
 ) -> dict:
-    idempotency_key = _require_idempotency_key(request)
     _get_theatre_or_404(conn, theatre_id)
+    idempotency_key = _derive_idempotency_key(theatre_id, body.name)
     writer = IdempotentWriter(conn)
     row, _created = writer.insert_or_get(
         "screen",

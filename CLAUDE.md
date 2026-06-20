@@ -21,7 +21,10 @@ CRUD (Appendix A/C, `AUTH_ENABLED`-gated), local CDN mock has a real
 `tests/integration/test_phase1.py` passes against the real stack. Notes:
 catalog's `?city=` filter uses theatre's `city_id` directly, no local
 `CITY` copy yet (defer to Phase 13's event bus); added
-`GET /theatres?city=` (gap in Appendix A).
+`GET /theatres?city=` (gap in Appendix A); idempotency keys for create
+endpoints are server-derived from identity fields, not a client header
+(design v9, §11.1) — revisit for booking (Phase 5), whose identity
+includes a seat-id list.
 
 **Update this section at session-end** with the now-completed phase.
 
@@ -33,7 +36,10 @@ catalog's `?city=` filter uses theatre's `city_id` directly, no local
   table. No framework.
 - **Idempotency**: `shared/idempotency/idempotency.py`
   (`INSERT...ON CONFLICT`, design §11.1). Use for every new
-  resource-creating endpoint.
+  resource-creating endpoint. Key is derived server-side from the
+  entity's identity-defining fields (a deterministic hash) — never a
+  client-supplied header. See `_derive_idempotency_key` in
+  `services/catalog/main.py` / `services/theatre/main.py`.
 - **Auth**: `shared/auth/auth.py` — `AUTH_ENABLED` toggle (§3.2),
   `get_auth_context`/`require_role(...)` deps. Use on every new endpoint.
 - **Events**: `shared/events/events.py` — `EventPublisher` interface;

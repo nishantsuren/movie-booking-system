@@ -1,4 +1,4 @@
-# Movie ticket booking system — design document (v8, production-oriented)
+# Movie ticket booking system — design document (v9, production-oriented)
 
 A BookMyShow-style platform, designed for production deployment. Python/FastAPI microservices, database-per-service, built around SOLID principles and a small set of deliberately-chosen patterns, sized against a stated DAU target.
 
@@ -9,6 +9,8 @@ v6 changes from v5: the static content server and the asset service, previously 
 v7 changes from v6: seat layout became fully freeform (id/label/x/y instead of row/column, authored via a canvas-based admin tool); the static content server and asset service were merged back into one local-only "local CDN mock" component; the routing service was retained for local setup with authentication disabled and made explicitly swappable for a real API gateway in production.
 
 v8 changes from v7: the failure-scenario coverage gap for admin operations is closed — a pessimistic edit lock (heartbeat-based, no fixed TTL) prevents concurrent edits to the same draft seat layout; seat materialization on showtime creation now has explicit fail-closed retry behavior; publish is stated as a single transaction; showtime deletion's check-then-act race against in-flight bookings is tightened, with the larger question of cancellation-with-consequences explicitly flagged as out of scope; and soft-delete's non-cascading behavior toward already-scheduled showtimes and existing bookings is stated outright rather than left as an unverified assumption.
+
+v9 changes from v8: idempotency keys for create-type endpoints are derived server-side from each entity's identity-defining fields (a deterministic hash) instead of a client-supplied `Idempotency-Key` header (§11.1, §6, Appendix A/C) — the client carries no key generation/retry-tracking burden. Booking creation (Phase 5) is explicitly flagged as deferred: its natural identity includes a seat-id list, which needs a canonicalization step before the same approach applies cleanly.
 
 ---
 
@@ -241,7 +243,7 @@ Proof of correctness: idempotent, single-writer by construction, automatic bound
 
 ## 6. API contracts
 
-See Appendix A (customer-facing) and Appendix C (admin-facing). All mutating endpoints require an `Idempotency-Key` header per §11.1.
+See Appendix A (customer-facing) and Appendix C (admin-facing). Create endpoints are idempotent via a server-derived key (§11.1) — no client-supplied `Idempotency-Key` header is required.
 
 ---
 
@@ -306,9 +308,11 @@ Bookings/payments: minimum 7 years (confirm against jurisdiction), ~12 months ho
 
 ## 11. Reliability standards: idempotency and retries
 
-### 11.1 Idempotency — database-enforced, per service, no shared store
+### 11.1 Idempotency — database-enforced, per service, no shared store, no client-managed key
 
-Each service enforces idempotency via a unique constraint (or a natural business key) checked by the same atomic write: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`. State-transition endpoints get idempotency from the state machine itself. No separate idempotency store.
+Each service enforces idempotency via a unique constraint checked by the same atomic write: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`. For create-type endpoints, `idempotency_key` is **derived server-side** as a deterministic hash of the request's identity-defining fields — `MOVIE`: title + duration + language; `MOVIE_RELEASE`: movie + city + release date; `THEATRE`: city + name; `SCREEN`: theatre + name; `ASSET`: a hash of the uploaded bytes themselves (content-addressable) — rather than a client-supplied token. A genuinely retried request always re-derives the same key from the same payload and is deduplicated automatically; the client never generates, stores, or resends a key. The accepted trade-off: two distinct entities that happen to share every identity-defining field collide into one row.
+
+Booking creation (Phase 5) defers this: `BOOKING`'s natural identity includes a seat-id list, which needs a canonicalization step (e.g. sorted and joined) before the same server-derived-hash approach applies — to be decided concretely when Phase 5 is built, not assumed here. State-transition endpoints get idempotency from the state machine itself. No separate idempotency store.
 
 ### 11.2 Idempotency scope — local to each service
 
@@ -430,7 +434,7 @@ GET    /users/{user_id}
 GET  /assets/{asset_id}        → binary content
 ```
 
-All mutating endpoints require an `Idempotency-Key` header (§11.1). All requests require auth only when `AUTH_ENABLED=true` (§3.2).
+Create endpoints are idempotent via a server-derived key (§11.1), not a client-supplied header. All requests require auth only when `AUTH_ENABLED=true` (§3.2).
 
 ## Appendix B — repository structure and build order
 
@@ -459,7 +463,7 @@ Build order: (1) catalog + theatre with seed data, plus the local CDN mock, (2) 
 
 ## Appendix C — admin-facing API contracts
 
-All endpoints below require an `ADMIN` role claim when `AUTH_ENABLED=true`, and an `Idempotency-Key` header on mutating calls (§11.1).
+All endpoints below require an `ADMIN` role claim when `AUTH_ENABLED=true`. Create endpoints are idempotent via a server-derived key (§11.1) — no client-supplied header needed.
 
 **Catalog service**
 ```

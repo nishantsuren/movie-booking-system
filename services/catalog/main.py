@@ -4,13 +4,14 @@ MOVIE + MOVIE_RELEASE (§4.4), customer browse (Appendix A) and admin CRUD
 (Appendix C). Soft-delete is genuine (`is_active`, §4.2) — never
 cascades, never hard-deletes.
 """
+import hashlib
 import os
 from datetime import date, datetime
 from typing import Optional
 from uuid import UUID
 
 import psycopg2
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
 from db import get_db
@@ -59,11 +60,19 @@ class MovieReleaseUpdate(BaseModel):
     actual_end_date: Optional[date] = None
 
 
-def _require_idempotency_key(request: Request) -> str:
-    key = request.headers.get("idempotency-key")
-    if not key:
-        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
-    return key
+def _derive_idempotency_key(*parts: object) -> str:
+    """Deterministic dedup key derived from a create request's
+    identity-defining fields (§11.1) -- no client-managed Idempotency-Key
+    header. Resubmitting the same logical create (a genuine retry, or an
+    accidental double-submit) always re-derives the same key and is
+    deduplicated automatically by the unique constraint on this column.
+
+    Trade-off accepted deliberately: two distinct entities that happen to
+    share every identity-defining field collide into one row. That's the
+    cost of not requiring an explicit caller-supplied key.
+    """
+    normalized = "|".join(str(p).strip().lower() for p in parts)
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 def _get_movie_or_404(conn, movie_id: UUID) -> dict:
@@ -115,11 +124,10 @@ def get_movie(movie_id: UUID, conn=Depends(get_db)) -> dict:
 @app.post("/admin/movies", status_code=201)
 def create_movie(
     body: MovieCreate,
-    request: Request,
     conn=Depends(get_db),
     _ctx: AuthContext = Depends(require_role("ADMIN")),
 ) -> dict:
-    idempotency_key = _require_idempotency_key(request)
+    idempotency_key = _derive_idempotency_key(body.title, body.duration_minutes, body.language)
     writer = IdempotentWriter(conn)
     row, _created = writer.insert_or_get(
         "movie",
@@ -182,12 +190,11 @@ def delete_movie(
 def create_release(
     movie_id: UUID,
     body: MovieReleaseCreate,
-    request: Request,
     conn=Depends(get_db),
     _ctx: AuthContext = Depends(require_role("ADMIN")),
 ) -> dict:
-    idempotency_key = _require_idempotency_key(request)
     _get_movie_or_404(conn, movie_id)
+    idempotency_key = _derive_idempotency_key(movie_id, body.city_id, body.release_date)
     writer = IdempotentWriter(conn)
     row, _created = writer.insert_or_get(
         "movie_release",

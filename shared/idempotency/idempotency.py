@@ -5,6 +5,13 @@ duplicate-check and the write are the same atomic database operation, via
 INSERT ... ON CONFLICT against a unique constraint already on the target
 table. Each service uses this against its own database — there is no
 cross-service idempotency store (§11.2).
+
+This class is agnostic to where `idempotency_key` comes from. The
+convention in this codebase is to derive it server-side as a
+deterministic hash of the request's identity-defining fields (see each
+service's `_derive_idempotency_key`) rather than accept a client-supplied
+token — the client carries no key-lifecycle burden, and a genuinely
+retried request always re-derives the same key from the same payload.
 """
 import time
 

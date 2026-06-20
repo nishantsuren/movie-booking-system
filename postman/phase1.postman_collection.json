@@ -1,0 +1,384 @@
+{
+  "info": {
+    "name": "Movie Booking — Phase 1",
+    "description": "Catalog + theatre (read/admin) + local CDN mock, run against the routing service (catalog/theatre) and the CDN mock directly (per design §3 — apps hit the CDN mock directly, not through routing). Import the companion environment (phase1.postman_environment.json), select it, then run folders top-to-bottom — later requests depend on IDs captured by earlier ones via response scripts. No Idempotency-Key header anywhere: create endpoints derive their dedup key server-side from each entity's identity-defining fields (design v9, §11.1) — title/duration/language for movies, city+name for theatres, theatre+name for screens, a content hash for assets.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "item": [
+    {
+      "name": "1. Health Checks",
+      "item": [
+        { "name": "Routing health", "request": { "method": "GET", "url": "{{routing_base}}/health" } },
+        { "name": "Catalog health (via routing)", "request": { "method": "GET", "url": "{{routing_base}}/catalog/health" } },
+        { "name": "Theatre health (via routing)", "request": { "method": "GET", "url": "{{routing_base}}/theatre/health" } },
+        { "name": "Local CDN mock health (direct)", "request": { "method": "GET", "url": "{{cdn_base}}/health" } }
+      ]
+    },
+    {
+      "name": "2. Theatre — Customer browse",
+      "item": [
+        {
+          "name": "List all theatres (captures city_id from seed data)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const data = pm.response.json();",
+                  "pm.test('has seeded theatres', () => pm.expect(data.length).to.be.above(0));",
+                  "if (data.length > 0) { pm.environment.set('city_id', data[0].city_id); }"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "url": "{{routing_base}}/theatre/theatres" }
+        },
+        {
+          "name": "List theatres scoped to city_id",
+          "request": { "method": "GET", "url": "{{routing_base}}/theatre/theatres?city={{city_id}}" }
+        },
+        {
+          "name": "Get theatre by ID (404 if random UUID)",
+          "request": { "method": "GET", "url": "{{routing_base}}/theatre/theatres/{{theatre_id}}" }
+        }
+      ]
+    },
+    {
+      "name": "3. Theatre — Admin CRUD lifecycle",
+      "item": [
+        {
+          "name": "Create theatre",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "exec": ["pm.environment.set('theatre_name', 'Postman Test Theatre ' + Date.now());"] }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('theatre_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{routing_base}}/theatre/admin/theatres",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"city_id\": \"{{city_id}}\",\n  \"name\": \"{{theatre_name}}\",\n  \"address\": \"1 Test Street\"\n}"
+            }
+          },
+          "description": "No Idempotency-Key header -- the server derives the dedup key from (city_id, name). A timestamp is mixed into the name so re-running this request creates a fresh theatre instead of colliding with a previous run's."
+        },
+        {
+          "name": "Update theatre",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('200 ok', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "PUT",
+            "url": "{{routing_base}}/theatre/admin/theatres/{{theatre_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"address\": \"2 Updated Avenue\"\n}" }
+          }
+        },
+        {
+          "name": "Create screen under theatre",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('screen_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{routing_base}}/theatre/admin/theatres/{{theatre_id}}/screens",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Screen 1\"\n}" }
+          },
+          "description": "Dedup key here is (theatre_id, name) -- safe to reuse 'Screen 1' across runs since each run creates a fresh theatre_id."
+        },
+        {
+          "name": "Update screen",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('200 ok', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "PUT",
+            "url": "{{routing_base}}/theatre/admin/screens/{{screen_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"name\": \"Screen 1 (IMAX)\"\n}" }
+          }
+        },
+        {
+          "name": "Confirm theatre reflects updates",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('address updated', () => pm.expect(body.address).to.eql('2 Updated Avenue'));"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "url": "{{routing_base}}/theatre/theatres/{{theatre_id}}" }
+        }
+      ]
+    },
+    {
+      "name": "4. Catalog — Customer browse",
+      "item": [
+        { "name": "List all active movies", "request": { "method": "GET", "url": "{{routing_base}}/catalog/movies" } },
+        {
+          "name": "List movies scoped to city_id",
+          "request": { "method": "GET", "url": "{{routing_base}}/catalog/movies?city={{city_id}}" }
+        },
+        {
+          "name": "Get movie by ID (404 if random UUID)",
+          "request": { "method": "GET", "url": "{{routing_base}}/catalog/movies/{{movie_id}}" }
+        }
+      ]
+    },
+    {
+      "name": "5. Catalog — Admin CRUD lifecycle",
+      "item": [
+        {
+          "name": "Create movie",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": { "exec": ["pm.environment.set('movie_title', 'Postman Test Movie ' + Date.now());"] }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('movie_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{routing_base}}/catalog/admin/movies",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"{{movie_title}}\",\n  \"description\": \"created via Postman\",\n  \"duration_minutes\": 115,\n  \"language\": \"English\"\n}"
+            }
+          },
+          "description": "No Idempotency-Key header -- dedup key is derived from (title, duration_minutes, language). A timestamp is mixed into the title so re-running creates a fresh movie instead of returning a previous run's (possibly already soft-deleted) row."
+        },
+        {
+          "name": "Update movie",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('200 ok', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "PUT",
+            "url": "{{routing_base}}/catalog/admin/movies/{{movie_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"title\": \"{{movie_title}} (updated)\"\n}" }
+          }
+        },
+        {
+          "name": "Create release for movie in city_id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('release_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{routing_base}}/catalog/admin/movies/{{movie_id}}/releases",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"city_id\": \"{{city_id}}\",\n  \"release_date\": \"2026-01-01\",\n  \"planned_end_date\": \"2026-12-31\"\n}"
+            }
+          },
+          "description": "Dedup key is (movie_id, city_id, release_date) -- safe to reuse this exact date across runs since each run creates a fresh movie_id."
+        },
+        {
+          "name": "Update release",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('200 ok', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "PUT",
+            "url": "{{routing_base}}/catalog/admin/releases/{{release_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{\n  \"actual_end_date\": \"2026-10-15\"\n}" }
+          }
+        },
+        {
+          "name": "Confirm movie + release updates via browse",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('title updated', () => pm.expect(body.title).to.eql(pm.environment.get('movie_title') + ' (updated)'));"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "url": "{{routing_base}}/catalog/movies/{{movie_id}}" }
+        },
+        {
+          "name": "Replay: resend identical Create movie body",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 on replay too', () => pm.response.to.have.status(201));",
+                  "pm.test('same movie id returned, no duplicate', () => pm.expect(pm.response.json().id).to.eql(pm.environment.get('movie_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{routing_base}}/catalog/admin/movies",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"title\": \"{{movie_title}}\",\n  \"description\": \"created via Postman\",\n  \"duration_minutes\": 115,\n  \"language\": \"English\"\n}"
+            }
+          },
+          "description": "Same exact body as the first 'Create movie' request, no header at all. Proves the server-derived key dedupes a resubmitted create -- this is what used to require a client-managed Idempotency-Key."
+        }
+      ]
+    },
+    {
+      "name": "6. Local CDN mock — Assets",
+      "item": [
+        {
+          "name": "Upload asset (multipart)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 created', () => pm.response.to.have.status(201));",
+                  "pm.environment.set('asset_id', pm.response.json().id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{cdn_base}}/assets",
+            "body": {
+              "mode": "formdata",
+              "formdata": [{ "key": "file", "type": "file", "src": "" }]
+            }
+          },
+          "description": "Pick any small file (e.g. a poster image) for the 'file' form field before sending. No Idempotency-Key header -- the dedup key is a hash of the uploaded bytes."
+        },
+        {
+          "name": "Retrieve uploaded asset",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('200 ok', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": { "method": "GET", "url": "{{cdn_base}}/assets/{{asset_id}}" }
+        },
+        {
+          "name": "Re-upload the SAME file again — proves content-hash dedup",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "pm.test('201 on replay too', () => pm.response.to.have.status(201));",
+                  "pm.test('same asset id returned, no duplicate', () => pm.expect(pm.response.json().id).to.eql(pm.environment.get('asset_id')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "url": "{{cdn_base}}/assets",
+            "body": { "mode": "formdata", "formdata": [{ "key": "file", "type": "file", "src": "" }] }
+          },
+          "description": "Attach the EXACT SAME file used in 'Upload asset' above (same bytes). No header involved -- the server hashes the content itself, so a retried upload always lands on the original asset row."
+        }
+      ]
+    },
+    {
+      "name": "7. Soft-delete non-cascading verification",
+      "item": [
+        {
+          "name": "Delete movie (soft-delete)",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('204 no content', () => pm.response.to.have.status(204));"] } }
+          ],
+          "request": { "method": "DELETE", "url": "{{routing_base}}/catalog/admin/movies/{{movie_id}}" }
+        },
+        {
+          "name": "Movie disappears from city-scoped browse",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const ids = pm.response.json().map(m => m.id);",
+                  "pm.test('deleted movie not in browse results', () => pm.expect(ids).to.not.include(pm.environment.get('movie_id')));"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "url": "{{routing_base}}/catalog/movies?city={{city_id}}" }
+        },
+        {
+          "name": "Movie still resolves directly by ID (is_active=false)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "exec": [
+                  "const body = pm.response.json();",
+                  "pm.test('200 ok, still resolves', () => pm.response.to.have.status(200));",
+                  "pm.test('is_active is false', () => pm.expect(body.is_active).to.eql(false));"
+                ]
+              }
+            }
+          ],
+          "request": { "method": "GET", "url": "{{routing_base}}/catalog/movies/{{movie_id}}" }
+        },
+        {
+          "name": "Release row survives untouched (non-cascading)",
+          "event": [
+            { "listen": "test", "script": { "exec": ["pm.test('200 ok, release unaffected', () => pm.response.to.have.status(200));"] } }
+          ],
+          "request": {
+            "method": "PUT",
+            "url": "{{routing_base}}/catalog/admin/releases/{{release_id}}",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        }
+      ]
+    }
+  ]
+}

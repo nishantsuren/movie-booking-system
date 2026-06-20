@@ -5,12 +5,20 @@
 - Asset upload (admin) then retrieval (public) round-trips correctly.
 - Soft-delete: a deactivated movie disappears from browse but still
   resolves by ID, non-cascading (§4.2).
+- Idempotency for create endpoints is server-derived from identity-defining
+  fields (design v9, §11.1) -- no client-supplied Idempotency-Key header.
 
 Runs against the real docker-compose stack (Postgres/Redis) plus every
 service started by `scripts/dev.sh` -- nothing here is mocked. The
 routing service fronts catalog/theatre; the local CDN mock is hit
 directly, per design doc §3 ("Both apps load... directly from the local
 CDN mock").
+
+Test data uses a random suffix in titles/names: since the create
+endpoints now derive their dedup key from those exact fields (§11.1),
+reusing a literal fixed title/name across separate test runs against a
+persistent dev database would collide with a previous run's (possibly
+already-renamed-or-deleted) row.
 """
 import uuid
 
@@ -33,31 +41,31 @@ def cdn():
         yield client
 
 
-def idem_headers() -> dict:
-    return {"Idempotency-Key": str(uuid.uuid4())}
+def unique(label: str) -> str:
+    return f"{label} {uuid.uuid4().hex[:8]}"
 
 
 # --- full CRUD lifecycle: movies, releases, theatres, screens ---
 
 def test_movie_crud_lifecycle(routing):
+    title = unique("Test Movie CRUD")
     create_resp = routing.post(
         "/catalog/admin/movies",
-        json={"title": "Test Movie CRUD", "description": "desc", "duration_minutes": 100, "language": "English"},
-        headers=idem_headers(),
+        json={"title": title, "description": "desc", "duration_minutes": 100, "language": "English"},
     )
     assert create_resp.status_code == 201, create_resp.text
     movie = create_resp.json()
-    assert movie["title"] == "Test Movie CRUD"
+    assert movie["title"] == title
     assert movie["is_active"] is True
     movie_id = movie["id"]
 
-    update_resp = routing.put(f"/catalog/admin/movies/{movie_id}", json={"title": "Test Movie CRUD (updated)"})
+    update_resp = routing.put(f"/catalog/admin/movies/{movie_id}", json={"title": f"{title} (updated)"})
     assert update_resp.status_code == 200, update_resp.text
-    assert update_resp.json()["title"] == "Test Movie CRUD (updated)"
+    assert update_resp.json()["title"] == f"{title} (updated)"
 
     get_resp = routing.get(f"/catalog/movies/{movie_id}")
     assert get_resp.status_code == 200
-    assert get_resp.json()["title"] == "Test Movie CRUD (updated)"
+    assert get_resp.json()["title"] == f"{title} (updated)"
 
     delete_resp = routing.delete(f"/catalog/admin/movies/{movie_id}")
     assert delete_resp.status_code == 204
@@ -70,8 +78,7 @@ def test_movie_crud_lifecycle(routing):
 def test_movie_release_crud_lifecycle(routing):
     movie_resp = routing.post(
         "/catalog/admin/movies",
-        json={"title": "Release Lifecycle Movie", "duration_minutes": 110},
-        headers=idem_headers(),
+        json={"title": unique("Release Lifecycle Movie"), "duration_minutes": 110},
     )
     movie_id = movie_resp.json()["id"]
     city_id = str(uuid.uuid4())  # loose reference -- no FK to theatre service
@@ -79,7 +86,6 @@ def test_movie_release_crud_lifecycle(routing):
     create_resp = routing.post(
         f"/catalog/admin/movies/{movie_id}/releases",
         json={"city_id": city_id, "release_date": "2026-06-01", "planned_end_date": "2026-09-01"},
-        headers=idem_headers(),
     )
     assert create_resp.status_code == 201, create_resp.text
     release = create_resp.json()
@@ -100,10 +106,10 @@ def test_theatre_and_screen_crud_lifecycle(routing):
     assert theatres, "expected seed data to be present"
     city_id = theatres[0]["city_id"]
 
+    theatre_name = unique("Test Theatre CRUD")
     create_resp = routing.post(
         "/theatre/admin/theatres",
-        json={"city_id": city_id, "name": "Test Theatre CRUD", "address": "123 Test St"},
-        headers=idem_headers(),
+        json={"city_id": city_id, "name": theatre_name, "address": "123 Test St"},
     )
     assert create_resp.status_code == 201, create_resp.text
     theatre = create_resp.json()
@@ -116,7 +122,6 @@ def test_theatre_and_screen_crud_lifecycle(routing):
     screen_resp = routing.post(
         f"/theatre/admin/theatres/{theatre_id}/screens",
         json={"name": "Screen 1"},
-        headers=idem_headers(),
     )
     assert screen_resp.status_code == 201, screen_resp.text
     screen = screen_resp.json()
@@ -129,7 +134,7 @@ def test_theatre_and_screen_crud_lifecycle(routing):
 
     get_theatre = routing.get(f"/theatre/theatres/{theatre_id}")
     assert get_theatre.status_code == 200
-    assert get_theatre.json()["name"] == "Test Theatre CRUD"
+    assert get_theatre.json()["name"] == theatre_name
 
 
 # --- city-scoped customer browse ---
@@ -164,12 +169,8 @@ def test_theatres_browse_is_city_scoped(routing):
 # --- asset upload/retrieve round-trip ---
 
 def test_asset_upload_and_retrieve_round_trip(cdn):
-    file_content = b"fake-poster-bytes-for-testing"
-    upload_resp = cdn.post(
-        "/assets",
-        files={"file": ("poster.jpg", file_content, "image/jpeg")},
-        headers=idem_headers(),
-    )
+    file_content = unique("fake-poster-bytes-for-testing").encode()
+    upload_resp = cdn.post("/assets", files={"file": ("poster.jpg", file_content, "image/jpeg")})
     assert upload_resp.status_code == 201, upload_resp.text
     asset = upload_resp.json()
     asset_id = asset["id"]
@@ -182,16 +183,46 @@ def test_asset_upload_and_retrieve_round_trip(cdn):
     assert get_resp.headers["content-type"] == "image/jpeg"
 
 
-def test_asset_upload_retry_with_same_idempotency_key_does_not_duplicate(cdn):
-    file_content = b"retry-test-bytes"
-    headers = idem_headers()
+def test_asset_upload_retry_with_identical_bytes_does_not_duplicate(cdn):
+    """No client-supplied key at all: the server derives the dedup key from
+    a hash of the uploaded bytes (§11.1), so resending identical content --
+    e.g. a client retrying after a dropped response -- always lands on the
+    same asset row."""
+    file_content = unique("retry-test-bytes").encode()
 
-    first = cdn.post("/assets", files={"file": ("retry.jpg", file_content, "image/jpeg")}, headers=headers)
-    second = cdn.post("/assets", files={"file": ("retry.jpg", file_content, "image/jpeg")}, headers=headers)
+    first = cdn.post("/assets", files={"file": ("retry.jpg", file_content, "image/jpeg")})
+    second = cdn.post("/assets", files={"file": ("retry.jpg", file_content, "image/jpeg")})
 
     assert first.status_code == 201
     assert second.status_code == 201
     assert first.json()["id"] == second.json()["id"], "replayed upload must return the original asset"
+
+
+# --- idempotency is server-derived, no client key, for catalog/theatre too ---
+
+def test_create_movie_with_identical_data_is_deduplicated_without_a_client_key(routing):
+    title = unique("Dedup Movie")
+    body = {"title": title, "duration_minutes": 100, "language": "English"}
+
+    first = routing.post("/catalog/admin/movies", json=body)
+    second = routing.post("/catalog/admin/movies", json=body)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"], "identical create payload must dedupe without any header"
+
+
+def test_create_theatre_with_identical_data_is_deduplicated_without_a_client_key(routing):
+    theatres = routing.get("/theatre/theatres").json()
+    city_id = theatres[0]["city_id"]
+    body = {"city_id": city_id, "name": unique("Dedup Theatre"), "address": "1 Dedup Way"}
+
+    first = routing.post("/theatre/admin/theatres", json=body)
+    second = routing.post("/theatre/admin/theatres", json=body)
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] == second.json()["id"], "identical create payload must dedupe without any header"
 
 
 # --- soft-delete: non-cascading, browse-visibility-only ---
@@ -199,8 +230,7 @@ def test_asset_upload_retry_with_same_idempotency_key_does_not_duplicate(cdn):
 def test_soft_delete_non_cascading(routing):
     movie_resp = routing.post(
         "/catalog/admin/movies",
-        json={"title": "Soft Delete Target", "duration_minutes": 90},
-        headers=idem_headers(),
+        json={"title": unique("Soft Delete Target"), "duration_minutes": 90},
     )
     movie_id = movie_resp.json()["id"]
     city_id = str(uuid.uuid4())
@@ -208,7 +238,6 @@ def test_soft_delete_non_cascading(routing):
     release_resp = routing.post(
         f"/catalog/admin/movies/{movie_id}/releases",
         json={"city_id": city_id, "release_date": "2026-01-01"},
-        headers=idem_headers(),
     )
     assert release_resp.status_code == 201
     release_id = release_resp.json()["id"]

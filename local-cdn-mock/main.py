@@ -7,12 +7,13 @@ Local-only -- not part of the production ownership model (§4.1) -- so,
 per this phase's explicit scope, no AUTH_ENABLED gating here (unlike
 catalog/theatre's admin endpoints).
 """
+import hashlib
 import os
 import uuid
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -33,25 +34,25 @@ def health() -> dict:
     return {"status": "ok", "service": "local-cdn-mock", "auth_enabled": AUTH_ENABLED}
 
 
-def _require_idempotency_key(request: Request) -> str:
-    key = request.headers.get("idempotency-key")
-    if not key:
-        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
-    return key
-
-
 # --- asset route group (§3.1, §4.1: ASSET metadata table) ---
 
 @app.post("/assets", status_code=201)
 async def upload_asset(
-    request: Request,
     file: UploadFile = File(...),
     conn=Depends(get_db),
 ) -> dict:
-    """Admin-facing upload path (Appendix C), used e.g. for movie posters."""
-    idempotency_key = _require_idempotency_key(request)
+    """Admin-facing upload path (Appendix C), used e.g. for movie posters.
+
+    Idempotency key is the content hash of the uploaded bytes (§11.1) --
+    content-addressable, no client-managed header. Re-uploading identical
+    bytes (e.g. a retried upload) always returns the original asset;
+    uploading the same bytes under a different filename also dedupes onto
+    the original, a deliberate trade-off of using content as the only
+    identity signal for a blob store.
+    """
     asset_id = uuid.uuid4()
     contents = await file.read()
+    idempotency_key = hashlib.sha256(contents).hexdigest()
     dest = STORAGE_DIR / f"{asset_id}_{file.filename}"
     dest.write_bytes(contents)
 
