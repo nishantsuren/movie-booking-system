@@ -13,24 +13,32 @@ conversation memory.
 
 ## Current state
 
-Phase 3 complete & verified: theatre has `SHOWTIME` + admin
-create/update/activate/deactivate; booking service stood up for the
-first time with `SHOWTIME_SEAT` + idempotent internal
-`materialize-seats` (§4.3/§5.3) — no locking/BOOKING/payment yet.
-`tests/integration/test_phase3.py` (4 tests) passes incl. a real
-fail-closed run. Design v10 fixes made this phase (see design.md
-changelog): `SHOWTIME.base_price` added (multiplier had nothing to
-multiply against); `DELETE /admin/showtimes` no longer hard-deletes —
-flips `is_active` false instead (confirmed w/ user: a showtime is a
-point-in-time screening, no duration/booking-check guard fits it).
-Showtimes always create `is_active=false`; materialization still
-happens unconditionally at creation. Known pre-existing Phase-2 gap,
-not fixed here: publishing a draft never deactivates a screen's prior
-ACTIVE layout, so showtime creation's "find the ACTIVE layout" query
-assumes at most one. Carries forward from Phase 2: draft creation has
-no idempotency key (confirmed w/ user); lock-gated endpoints use JWT
-`sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id` header (no real
-users until Phase 7). Carries forward from Phase 1: catalog's `?city=`
+Phase 4 complete & verified: `RedisSeatLocker`
+(`services/booking/adapters/redis_seat_locker.py`) — standalone
+acquire/release, no HTTP, no BookingOrchestrator, no BOOKING table
+(Phase 5). Atomic multi-key Lua `EVAL` (§5.1); lock keys hash-tagged on
+`showtime_id` (design v11 — resolves a real §5.1 vs §5.2 contradiction:
+a multi-key `EVAL` is only atomic on a cluster if every key shares a
+slot, so keys can't both be atomic-together and spread-apart; one
+showtime's keys now colocate, different showtimes still spread).
+`tests/integration/test_phase4.py` (5 tests) passes: 100-way identical-set
+race → exactly 1 winner; sliding-window overlap race → disjoint winners,
+zero partial locks; TTL expiry releases with no manual cleanup; key
+hash-slot check; real Redis-container-killed retry/recovery test (fixed
+a genuine redis-py gotcha — the *first* connection attempt raises a bare
+`ConnectionRefusedError`, not `redis.exceptions.ConnectionError`, so
+`retry_on_error` must include the builtin `ConnectionError` too or
+retry-with-backoff silently never fires). Node-failure test exercises
+client retry only, not real replica promotion — no multi-node Redis
+Cluster in local dev (confirmed w/ user, single `redis:7` container
+stays per CLAUDE.md's convention). Carries forward from Phase 3: design
+v10 (`SHOWTIME.base_price`; `DELETE /admin/showtimes` flips `is_active`
+false, no hard delete); known pre-existing Phase-2 gap (publishing a
+draft never deactivates a screen's prior ACTIVE layout) still not fixed.
+Carries forward from Phase 2: draft creation has no idempotency key
+(confirmed w/ user); lock-gated endpoints use JWT `sub` when
+`AUTH_ENABLED=true` else `X-Admin-User-Id` header (no real users until
+Phase 7). Carries forward from Phase 1: catalog's `?city=`
 uses theatre's `city_id` directly (no local `CITY` copy till Phase
 13); `GET /theatres?city=` added (Appendix A gap).
 

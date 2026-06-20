@@ -14,6 +14,8 @@ v9 changes from v8: idempotency keys for create-type endpoints are derived serve
 
 v10 changes from v9 (Phase 3 build-time corrections — design doc was incomplete/wrong, fixed during implementation rather than silently worked around): (1) `SEAT_TEMPLATE.price_multiplier` had no base price to multiply against anywhere in the schema — `SHOWTIME` now carries `base_price`, and `SHOWTIME_SEAT.price` is computed as `base_price * price_multiplier` at materialization time (§4.3). (2) The original `DELETE /admin/showtimes/{id}` ("only if no active bookings — synchronous check") didn't fit `SHOWTIME`'s actual shape: a `SHOWTIME` is a single point-in-time screening with no duration/end-date of its own (that's `THEATRE_MOVIE_RUN`/`MOVIE_RELEASE`'s job, §4.4), so there's nothing for an "early end date" to mean at this level, and a synchronous cross-service booking check is pointless before Phase 5 — nothing can be non-`AVAILABLE` yet. Replaced with: `SHOWTIME.is_active` defaults `false` on creation (preventing an accidentally-live showtime), a new `POST /admin/showtimes/{id}/activate` flips it `true`, and `DELETE /admin/showtimes/{id}` now flips it back to `false` rather than removing the row — no hard delete, no row-removal race to guard at all. Seat materialization (§4.3) still happens unconditionally at creation time, before activation, so a showtime can never be activated without a complete seat inventory already in place.
 
+v11 changes from v10 (Phase 4 build-time correction): §5.1 and §5.2 as originally written contradicted each other on a real Redis Cluster — a single atomic multi-key `EVAL` (§5.1) is only atomic if every key it touches maps to the same hash slot, but §5.2 said lock keys omit hash tags specifically so one showtime's seats spread across *different* slots/nodes, which would make that same `EVAL` raise `CROSSSLOT` in production. Resolved by hash-tagging lock keys on `showtime_id` (`lock:{<showtime_id>}:<seat_id>`): one showtime's seats now always colocate on a single slot — making §5.1's atomic script safe with no `CROSSSLOT` risk — while different showtimes still land on different slots, so overall cluster-wide load still distributes normally. Sacrificing intra-showtime spreading is fine: a single shard's sequential throughput is orders of magnitude beyond even a hot-showtime stampede's burst volume (§2's worst case is thousands of req/s against ~150-300 seats, far inside one Redis instance's six-figure ops/sec capacity) — there is no realistic scenario where one showtime alone needs more than one shard's throughput.
+
 ---
 
 ## 1. Requirements recap
@@ -210,11 +212,11 @@ erDiagram
 
 ### 5.1 Correctness layer — atomic multi-seat lock
 
-A single Lua script (`EVAL`) checks and sets all requested seat keys (`lock:{showtime_id}:{seat_id}`, `SET NX EX 600`) in one atomic server-side round trip.
+A single Lua script (`EVAL`) checks and sets all requested seat keys (`lock:{<showtime_id>}:<seat_id>` — the `{...}` is a Redis hash tag, §5.2 — `SET NX EX 600`) in one atomic server-side round trip. All-or-nothing: if any requested seat is already held, none are set, and the conflicting seat IDs are returned to the caller.
 
 ### 5.2 Distribution layer — surviving a stampede without a virtual queue (deferred, §16.1)
 
-Lock keys omit Redis hash tags, so a single hot showtime's seats spread naturally across Redis Cluster nodes. A stampede produces fast, clean `409` conflicts — correctness guaranteed regardless (§5.1, §5.3) — rather than smooth queued admission, deferred to §16.1.
+Lock keys are hash-tagged on `showtime_id` (`lock:{<showtime_id>}:<seat_id>`, v11 — see changelog for why the original "omit hash tags" version contradicted §5.1's atomicity on a real cluster), so one showtime's seats always colocate on a single Redis Cluster slot, while different showtimes still land on different slots/nodes — overall cluster-wide load distributes normally, only a single showtime's own keys are deliberately kept together. A stampede against one showtime produces fast, clean `409` conflicts — correctness guaranteed regardless (§5.1, §5.3) — rather than smooth queued admission, deferred to §16.1; that single shard's throughput comfortably absorbs even a hot-showtime burst (§2) without needing to spread that showtime's own keys further.
 
 ### 5.3 Defense-in-depth layer — Postgres as the actual backstop, correctly
 
