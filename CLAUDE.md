@@ -13,34 +13,28 @@ conversation memory.
 
 ## Current state
 
-Phase 4 complete & verified: `RedisSeatLocker`
-(`services/booking/adapters/redis_seat_locker.py`) — standalone
-acquire/release, no HTTP, no BookingOrchestrator, no BOOKING table
-(Phase 5). Atomic multi-key Lua `EVAL` (§5.1); lock keys hash-tagged on
-`showtime_id` (design v11 — resolves a real §5.1 vs §5.2 contradiction:
-a multi-key `EVAL` is only atomic on a cluster if every key shares a
-slot, so keys can't both be atomic-together and spread-apart; one
-showtime's keys now colocate, different showtimes still spread).
-`tests/integration/test_phase4.py` (5 tests) passes: 100-way identical-set
-race → exactly 1 winner; sliding-window overlap race → disjoint winners,
-zero partial locks; TTL expiry releases with no manual cleanup; key
-hash-slot check; real Redis-container-killed retry/recovery test (fixed
-a genuine redis-py gotcha — the *first* connection attempt raises a bare
-`ConnectionRefusedError`, not `redis.exceptions.ConnectionError`, so
-`retry_on_error` must include the builtin `ConnectionError` too or
-retry-with-backoff silently never fires). Node-failure test exercises
-client retry only, not real replica promotion — no multi-node Redis
-Cluster in local dev (confirmed w/ user, single `redis:7` container
-stays per CLAUDE.md's convention). Carries forward from Phase 3: design
-v10 (`SHOWTIME.base_price`; `DELETE /admin/showtimes` flips `is_active`
-false, no hard delete); known pre-existing Phase-2 gap (publishing a
-draft never deactivates a screen's prior ACTIVE layout) still not fixed.
-Carries forward from Phase 2: draft creation has no idempotency key
-(confirmed w/ user); lock-gated endpoints use JWT `sub` when
-`AUTH_ENABLED=true` else `X-Admin-User-Id` header (no real users until
-Phase 7). Carries forward from Phase 1: catalog's `?city=`
-uses theatre's `city_id` directly (no local `CITY` copy till Phase
-13); `GET /theatres?city=` added (Appendix A gap).
+Phase 5 complete & verified: `BOOKING` + full saga (select seats ->
+PENDING -> mocked payment -> confirm -> BOOKED) via `BookingOrchestrator`
+(`services/booking/{domain,application,adapters}/`); payment service
+built out for real. Design v12 fixes (see design.md changelog): booking
+idempotency key = hash(showtime_id+user_id+sorted seat_ids) via a
+**partial** unique index (`WHERE status IN (PENDING,CONFIRMED)`, not
+plain -- same triple is a legitimate recurring identity); `movie_title`
+has no other path into BOOKING's snapshot, so admin now supplies it at
+showtime-creation (same trust tier as movie_id), passed through
+materialize-seats into a local `SHOWTIME_META` cache -- zero live
+cross-service calls on the booking hot path. `confirm`'s sole
+concurrency guard is the SHOWTIME_SEAT PK-scoped conditional update
+(§5.6), not a separate booking-row lock. `tests/integration/test_phase5.py`
+(8 tests, 1 verified for real w/ payment stopped) + full regression (38
+tests) pass. Showtime-deletion-race test dropped per v10 (no row removal
+to race against). Carries forward: `RedisSeatLocker`/hash-tagged keys
+(Phase 4, v11); `SHOWTIME.base_price` (Phase 3, v10); pre-existing
+Phase-2 gap (publish never deactivates a screen's prior ACTIVE layout,
+still unfixed); draft creation has no idempotency key; lock-gated
+endpoints use JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id`
+(no real users until Phase 7); catalog's `?city=` uses theatre's
+`city_id` directly (no local `CITY` copy till Phase 13).
 
 **Update this section at session-end** with the now-completed phase.
 

@@ -53,6 +53,7 @@ python infra/migrations/run_migrations.py catalog "$PG/catalog_db"
 python infra/migrations/run_migrations.py theatre "$PG/theatre_db"
 python infra/migrations/run_migrations.py asset "$PG/asset_db"
 python infra/migrations/run_migrations.py booking "$PG/booking_db"
+python infra/migrations/run_migrations.py payment "$PG/payment_db"
 
 start_service catalog services/catalog 8001 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/catalog_db"
@@ -63,7 +64,7 @@ start_service theatre services/theatre 8002 \
 
 start_service booking services/booking 8003 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/booking_db" \
-  REDIS_URL="$REDIS"
+  REDIS_URL="$REDIS" PAYMENT_SERVICE_URL="http://localhost:8004"
 
 start_service payment services/payment 8004 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/payment_db"

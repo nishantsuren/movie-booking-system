@@ -46,12 +46,12 @@ class MaterializationFailed(RuntimeError):
     fail-closed: no orphan showtime with zero bookable seats)."""
 
 
-def _materialize_seats_with_retry(showtime_id: UUID, seats_payload: list[dict]) -> dict:
+def _materialize_seats_with_retry(showtime_id: UUID, movie_title: str, seats_payload: list[dict]) -> dict:
     url = f"{BOOKING_SERVICE_URL}/internal/showtimes/{showtime_id}/materialize-seats"
     last_error: Optional[str] = None
     for attempt in range(MATERIALIZE_MAX_ATTEMPTS):
         try:
-            resp = httpx.post(url, json={"seats": seats_payload}, timeout=5.0)
+            resp = httpx.post(url, json={"movie_title": movie_title, "seats": seats_payload}, timeout=5.0)
         except httpx.TransportError as exc:
             last_error = f"transport error calling booking service: {exc}"
         else:
@@ -133,6 +133,7 @@ class CloneRequest(BaseModel):
 
 class ShowtimeCreate(BaseModel):
     movie_id: UUID
+    movie_title: str
     screen_id: UUID
     start_time: datetime
     is_high_demand: bool = False
@@ -141,6 +142,7 @@ class ShowtimeCreate(BaseModel):
 
 class ShowtimeUpdate(BaseModel):
     movie_id: Optional[UUID] = None
+    movie_title: Optional[str] = None
     start_time: Optional[datetime] = None
     is_high_demand: Optional[bool] = None
     base_price: Optional[float] = None
@@ -742,14 +744,15 @@ def create_showtime(
     with conn.cursor() as cur:
         cur.execute(
             """
-            INSERT INTO showtime (idempotency_key, movie_id, screen_id, start_time, is_high_demand, base_price)
-            VALUES (%(idempotency_key)s, %(movie_id)s, %(screen_id)s, %(start_time)s, %(is_high_demand)s, %(base_price)s)
+            INSERT INTO showtime (idempotency_key, movie_id, movie_title, screen_id, start_time, is_high_demand, base_price)
+            VALUES (%(idempotency_key)s, %(movie_id)s, %(movie_title)s, %(screen_id)s, %(start_time)s, %(is_high_demand)s, %(base_price)s)
             ON CONFLICT (idempotency_key) DO NOTHING
             RETURNING *
             """,
             {
                 "idempotency_key": idempotency_key,
                 "movie_id": str(body.movie_id),
+                "movie_title": body.movie_title,
                 "screen_id": str(body.screen_id),
                 "start_time": body.start_time,
                 "is_high_demand": body.is_high_demand,
@@ -781,7 +784,7 @@ def create_showtime(
     ]
 
     try:
-        _materialize_seats_with_retry(showtime["id"], seats_payload)
+        _materialize_seats_with_retry(showtime["id"], body.movie_title, seats_payload)
     except MaterializationFailed as exc:
         conn.rollback()
         raise HTTPException(

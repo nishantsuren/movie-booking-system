@@ -136,6 +136,7 @@ def publish_layout(routing, screen_id: str, seats: list[dict]) -> dict:
 def make_showtime_body(screen_id: str, movie_id: str = None, base_price: float = 200.0, start_time: datetime = None) -> dict:
     return {
         "movie_id": movie_id or str(uuid.uuid4()),
+        "movie_title": "Test Movie",  # required as of Phase 5 (design v12)
         "screen_id": screen_id,
         "start_time": (start_time or (datetime.now(timezone.utc) + timedelta(days=7))).isoformat(),
         "base_price": base_price,
@@ -202,6 +203,7 @@ def test_materialize_called_twice_is_a_clean_no_op(routing, booking_direct, book
     # Simulate the retried call theatre service would make on a network
     # blip -- same showtime_id, same seat_template_ids.
     materialize_payload = {
+        "movie_title": "Test Movie",  # required as of Phase 5 (design v12)
         "seats": [
             {
                 "seat_template_id": s["id"],

@@ -16,6 +16,8 @@ v10 changes from v9 (Phase 3 build-time corrections — design doc was incomplet
 
 v11 changes from v10 (Phase 4 build-time correction): §5.1 and §5.2 as originally written contradicted each other on a real Redis Cluster — a single atomic multi-key `EVAL` (§5.1) is only atomic if every key it touches maps to the same hash slot, but §5.2 said lock keys omit hash tags specifically so one showtime's seats spread across *different* slots/nodes, which would make that same `EVAL` raise `CROSSSLOT` in production. Resolved by hash-tagging lock keys on `showtime_id` (`lock:{<showtime_id>}:<seat_id>`): one showtime's seats now always colocate on a single slot — making §5.1's atomic script safe with no `CROSSSLOT` risk — while different showtimes still land on different slots, so overall cluster-wide load still distributes normally. Sacrificing intra-showtime spreading is fine: a single shard's sequential throughput is orders of magnitude beyond even a hot-showtime stampede's burst volume (§2's worst case is thousands of req/s against ~150-300 seats, far inside one Redis instance's six-figure ops/sec capacity) — there is no realistic scenario where one showtime alone needs more than one shard's throughput.
 
+v12 changes from v11 (Phase 5 build-time corrections — two gaps the design doc left open, resolved during the build): (1) **`BOOKING` idempotency canonicalization** (§11.1, deferred since v9): key = `sha256("|".join([showtime_id, user_id, sorted(seat_ids)-joined-by-comma]))`, lowercased, same convention as every other server-derived key. `user_id` is included so two different users requesting the same seats never hash to the same key (which would hand one user the other's booking). The constraint enforcing it is a **partial unique index** — `UNIQUE (idempotency_key) WHERE status IN ('PENDING', 'CONFIRMED')` — not a plain `UNIQUE`, because unlike `MOVIE`/`THEATRE`/etc., the same `(user, showtime, seats)` triple is a legitimate *recurring* identity: a hold expires or gets cancelled, and the same user trying the same seats again later must succeed, not be permanently deduplicated against a dead row. The partial index dedupes retries of a still-live request while freeing the key the instant a booking reaches a terminal state. (2) **`movie_title` had no path into `BOOKING`'s snapshot**: booking service only ever sees `showtime_id` and its own local `SHOWTIME_SEAT` data — `movie_id → title` lives in catalog, a hop booking has no route to without a new live cross-service call on the booking hot path. Resolved by extending the trust model `movie_id` already had (§4.2: admin-supplied, never live-validated) to `movie_title` too: `POST /admin/showtimes` (Appendix C) now also takes `movie_title`; theatre stores it and passes it through the existing `materialize-seats` call (§4.3); booking persists it in a small local cache (`SHOWTIME_META`, keyed on `showtime_id`) populated once at materialize time. Zero new live cross-service calls anywhere on the booking hot path.
+
 ---
 
 ## 1. Requirements recap
@@ -103,7 +105,7 @@ Cross-service references are plain UUID columns with no DB-enforced constraint, 
 
 ### 4.3 Materializing showtime seats
 
-Theatre service owns the seat layout (`SCREEN → SEAT_LAYOUT → SEAT_TEMPLATE`, real-FK'd within its own DB) and creates `SHOWTIME` rows, each carrying its own `base_price` (v10 — see changelog) since `SEAT_TEMPLATE.price_multiplier` has nothing to multiply against on its own. When a showtime is created (admin API, §5.5), theatre service computes each materialized seat's `price` as `base_price * price_multiplier` and calls booking service's idempotent materialize endpoint (§5.3) with the standard §11.3 retry policy (bounded attempts, backoff). **If materialization still fails after retries are exhausted, showtime creation itself fails and returns an error to the admin** — fail-closed, deliberately reusing existing idempotency/retry infrastructure rather than introducing a new "showtime exists but has no seats yet" state. This also guarantees a showtime can never be activated (below) with an incomplete seat inventory. Once materialized, booking service writes its own local `SHOWTIME_SEAT` rows with `label`, `position_x`, `position_y`, `seat_type`, `price` copied in, plus `seat_template_id` retained as a loose reference for the uniqueness guard in §5.3.
+Theatre service owns the seat layout (`SCREEN → SEAT_LAYOUT → SEAT_TEMPLATE`, real-FK'd within its own DB) and creates `SHOWTIME` rows, each carrying its own `base_price` (v10 — see changelog) since `SEAT_TEMPLATE.price_multiplier` has nothing to multiply against on its own, and its own `movie_title` (v12 — admin-supplied alongside `movie_id` at creation, same trust tier as `movie_id` itself per §4.2: never live-validated against catalog). When a showtime is created (admin API, §5.5), theatre service computes each materialized seat's `price` as `base_price * price_multiplier` and calls booking service's idempotent materialize endpoint (§5.3) with the standard §11.3 retry policy (bounded attempts, backoff), passing `movie_title` alongside the seat list. **If materialization still fails after retries are exhausted, showtime creation itself fails and returns an error to the admin** — fail-closed, deliberately reusing existing idempotency/retry infrastructure rather than introducing a new "showtime exists but has no seats yet" state. This also guarantees a showtime can never be activated (below) with an incomplete seat inventory. Once materialized, booking service writes its own local `SHOWTIME_SEAT` rows with `label`, `position_x`, `position_y`, `seat_type`, `price` copied in, plus `seat_template_id` retained as a loose reference for the uniqueness guard in §5.3 — and upserts `movie_title` into a small local `SHOWTIME_META` cache keyed on `showtime_id` (v12), which is what later lets `BOOKING` creation (§5.6) snapshot a movie title without any live cross-service call on the booking hot path.
 
 A newly created `SHOWTIME` defaults `is_active = false` — it exists and is fully seated, but isn't yet live. A separate `POST /admin/showtimes/{id}/activate` (Appendix C) flips it `true`. `DELETE /admin/showtimes/{id}` flips it back to `false` rather than removing the row — there is no hard delete and no row-removal race to guard against (v10; see changelog for why the original "delete only if no active bookings" contract didn't fit this entity).
 
@@ -167,6 +169,7 @@ erDiagram
   SHOWTIME {
     uuid id PK
     uuid movie_id "loose ref"
+    string movie_title "admin-supplied, v12"
     uuid screen_id FK
     datetime start_time
     boolean is_high_demand
@@ -186,16 +189,26 @@ erDiagram
     uuid locked_by_booking_id FK
     datetime lock_expires_at
   }
+  SHOWTIME_META {
+    uuid showtime_id PK "loose ref, v12"
+    string movie_title
+  }
   BOOKING {
     uuid id PK
     uuid user_id "loose ref"
     uuid showtime_id "loose ref"
-    string idempotency_key
+    string idempotency_key "unique only WHERE status IN (PENDING, CONFIRMED), v12"
     string movie_title
     string seat_labels
     float price_paid
     string status
     datetime expires_at
+  }
+  PAYMENT {
+    uuid id PK
+    uuid booking_id "loose ref, also the idempotency key, v12"
+    float amount
+    string status "always SUCCESS, mocked"
   }
   THEATRE_MOVIE_RUN {
     uuid id PK
@@ -246,6 +259,14 @@ WHERE locked_by_booking_id = ANY(:ids) AND status = 'LOCKED';
 ```
 
 Proof of correctness: idempotent, single-writer by construction, automatic bounded failover. Required tests: kill the active instance mid-batch; start three replicas simultaneously; race a concurrent payment-confirm against sweep selection; re-run immediately after a successful pass. Ongoing verification: sweep lag and lock-holder as metrics (§14).
+
+### 5.6 Booking creation, confirmation, and cancellation mechanics (Phase 5, v12)
+
+`select_seats` (§8's `BookingOrchestrator`): checks for an existing live (`PENDING`/`CONFIRMED`) booking under the request's derived idempotency key first (§11.1) — a genuine retry returns that row directly, touching neither Redis nor `SHOWTIME_SEAT`. Only a genuinely new request acquires the Redis lock (§5.1), then inserts the `BOOKING` row, then runs a second conditional update — `SHOWTIME_SEAT` rows flip `AVAILABLE → LOCKED` (`status = 'AVAILABLE'`, scoped to the requested seat IDs) — as the Postgres-side defense-in-depth reflection of the Redis lock (§5.3's header: "Postgres as the actual backstop"). If that update's affected-row count doesn't match the requested seat count, something is inconsistent between the two layers; the Redis lock is released and the request fails closed rather than persisting a half-correct booking.
+
+`confirm` relies on §5.3 point 1 as its *sole* concurrency primitive — no separate booking-row lock is taken first. One transaction: `UPDATE showtime_seat SET status = 'BOOKED' WHERE showtime_id = :showtime_id AND locked_by_booking_id = :booking_id AND status = 'LOCKED' AND lock_expires_at > now() RETURNING id`, immediately followed (same transaction, same connection) by `UPDATE booking SET status = 'CONFIRMED' WHERE id = :booking_id AND status = 'PENDING' RETURNING *`. Postgres's row-level locking on the `showtime_seat` rows serializes two racing `confirm` calls for the same booking: the loser's `UPDATE` blocks until the winner's transaction commits, then re-evaluates against the now-`'BOOKED'` rows and affects zero — and because both statements share the winner's transaction, the loser is guaranteed to see the `booking` row already `'CONFIRMED'` by the time it's unblocked, not a stale `'PENDING'`. A zero-affected-rows loser therefore checks the booking's current status: `CONFIRMED` means it lost the race to a legitimate concurrent confirm and returns that row idempotently (no re-execution, no error); still `PENDING` past `expires_at` means the hold expired; anything else is a genuine inconsistency.
+
+`DELETE /bookings/{id}` (cancel): `UPDATE booking SET status = 'CANCELLED' WHERE id = :id AND status = 'PENDING' RETURNING *`, then `SHOWTIME_SEAT` rows locked by this booking revert to `AVAILABLE` and the Redis lock is released. Only `PENDING` bookings can be cancelled this way — refunding a `CONFIRMED` booking is the same out-of-scope question §16.6 already flags.
 
 ---
 
@@ -320,7 +341,7 @@ Bookings/payments: minimum 7 years (confirm against jurisdiction), ~12 months ho
 
 Each service enforces idempotency via a unique constraint checked by the same atomic write: `INSERT ... ON CONFLICT (idempotency_key) DO NOTHING RETURNING *`. For create-type endpoints, `idempotency_key` is **derived server-side** as a deterministic hash of the request's identity-defining fields — `MOVIE`: title + duration + language; `MOVIE_RELEASE`: movie + city + release date; `THEATRE`: city + name; `SCREEN`: theatre + name; `ASSET`: a hash of the uploaded bytes themselves (content-addressable) — rather than a client-supplied token. A genuinely retried request always re-derives the same key from the same payload and is deduplicated automatically; the client never generates, stores, or resends a key. The accepted trade-off: two distinct entities that happen to share every identity-defining field collide into one row.
 
-Booking creation (Phase 5) defers this: `BOOKING`'s natural identity includes a seat-id list, which needs a canonicalization step (e.g. sorted and joined) before the same server-derived-hash approach applies — to be decided concretely when Phase 5 is built, not assumed here. State-transition endpoints get idempotency from the state machine itself. No separate idempotency store.
+`BOOKING` (Phase 5, v12): `idempotency_key = sha256("showtime_id|user_id|" + ",".join(sorted(seat_ids)))` (lowercased per the usual convention). Enforced via a **partial** unique index — `UNIQUE (idempotency_key) WHERE status IN ('PENDING', 'CONFIRMED')`, not a plain `UNIQUE` — because the same `(user, showtime, seats)` triple is a legitimate recurring identity (a hold expires or is cancelled, the same user retries the same seats later) rather than a permanently-unique entity like `MOVIE`/`THEATRE`; the partial index dedupes retries of a still-live request but frees the key once a booking reaches a terminal state. State-transition endpoints (`confirm`, cancel) get idempotency from the state machine itself — a conditional `UPDATE ... WHERE status = 'PENDING'` (§5.3-style), not a hash. No separate idempotency store.
 
 ### 11.2 Idempotency scope — local to each service
 
@@ -417,16 +438,16 @@ GET  /showtimes/{showtime_id}
 **Booking service**
 ```
 GET    /showtimes/{showtime_id}/seatmap            → [{ id, label, x, y, seat_type, price, status }, ...]
-POST   /bookings                                    { showtime_id, seat_ids, user_id } → 201 PENDING | 409 conflict
+POST   /bookings                                    { showtime_id, seat_ids, user_id } → 201 PENDING | 409 conflict (§5.6)
 GET    /bookings/{booking_id}
-DELETE /bookings/{booking_id}
-POST   /bookings/{booking_id}/confirm               internal, idempotent
+DELETE /bookings/{booking_id}                       explicit cancel, PENDING only (§5.6)
+POST   /bookings/{booking_id}/confirm               { payment_id } → idempotent (§5.6) -- v12 fills in the body shape "internal" left unspecified
 POST   /bookings/{booking_id}/resend-confirmation   (future, §16.3)
 ```
 
 **Payment service**
 ```
-POST   /payments        { booking_id, amount } → { payment_id, status: SUCCESS }   (mocked)
+POST   /payments        { booking_id, amount } → { payment_id, status: SUCCESS }   (mocked, booking_id is the idempotency key per §4.1)
 GET    /payments/{payment_id}
 ```
 
@@ -497,7 +518,7 @@ PATCH  /admin/seat-layouts/draft/{draft_id}/seats              bulk-edit a multi
 POST   /admin/seat-layouts/draft/{draft_id}/publish            finalize, assign to screen, single transaction — requires holding the lock
 POST   /admin/seat-layouts/{layout_id}/clone                   { target_screen_id }
 
-POST   /admin/showtimes                                          create showtime, always is_active=false — triggers §4.3 seat materialization, fails closed on exhausted retries
+POST   /admin/showtimes                                          { movie_id, movie_title, screen_id, start_time, is_high_demand, base_price } (v12 adds movie_title) — always is_active=false, triggers §4.3 seat materialization, fails closed on exhausted retries
 PUT    /admin/showtimes/{showtime_id}
 POST   /admin/showtimes/{showtime_id}/activate                   flips is_active to true (v10)
 DELETE /admin/showtimes/{showtime_id}                             flips is_active back to false — no row removal (v10, see §13/§16.6)
