@@ -52,6 +52,7 @@ echo "Applying migrations..."
 python infra/migrations/run_migrations.py catalog "$PG/catalog_db"
 python infra/migrations/run_migrations.py theatre "$PG/theatre_db"
 python infra/migrations/run_migrations.py asset "$PG/asset_db"
+python infra/migrations/run_migrations.py booking "$PG/booking_db"
 
 start_service catalog services/catalog 8001 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/catalog_db"

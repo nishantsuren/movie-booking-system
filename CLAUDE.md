@@ -13,18 +13,26 @@ conversation memory.
 
 ## Current state
 
-Phase 2 complete & verified: theatre service has `SEAT_LAYOUT`/
-`SEAT_TEMPLATE` (§4.5, freeform) + draft create/edit/publish/clone +
-§4.6 draft lock (acquire/heartbeat/release, ~2min staleness, no sweep).
-`tests/integration/test_phase2.py` (11 tests) passes. Notes: draft
-creation has no idempotency key (confirmed w/ user — screen_id+name
-isn't a safe dedup key across re-edit cycles, same issue as deferred
-BOOKING in §11.1); lock-gated endpoints identify caller via JWT `sub`
-when `AUTH_ENABLED=true` else required `X-Admin-User-Id` header (no
-real users until Phase 7) — see `_get_admin_identity` in
-`services/theatre/main.py`. Carries forward from Phase 1: catalog's
-`?city=` filter uses theatre's `city_id` directly (no local `CITY`
-copy till Phase 13); `GET /theatres?city=` added (Appendix A gap).
+Phase 3 complete & verified: theatre has `SHOWTIME` + admin
+create/update/activate/deactivate; booking service stood up for the
+first time with `SHOWTIME_SEAT` + idempotent internal
+`materialize-seats` (§4.3/§5.3) — no locking/BOOKING/payment yet.
+`tests/integration/test_phase3.py` (4 tests) passes incl. a real
+fail-closed run. Design v10 fixes made this phase (see design.md
+changelog): `SHOWTIME.base_price` added (multiplier had nothing to
+multiply against); `DELETE /admin/showtimes` no longer hard-deletes —
+flips `is_active` false instead (confirmed w/ user: a showtime is a
+point-in-time screening, no duration/booking-check guard fits it).
+Showtimes always create `is_active=false`; materialization still
+happens unconditionally at creation. Known pre-existing Phase-2 gap,
+not fixed here: publishing a draft never deactivates a screen's prior
+ACTIVE layout, so showtime creation's "find the ACTIVE layout" query
+assumes at most one. Carries forward from Phase 2: draft creation has
+no idempotency key (confirmed w/ user); lock-gated endpoints use JWT
+`sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id` header (no real
+users until Phase 7). Carries forward from Phase 1: catalog's `?city=`
+uses theatre's `city_id` directly (no local `CITY` copy till Phase
+13); `GET /theatres?city=` added (Appendix A gap).
 
 **Update this section at session-end** with the now-completed phase.
 

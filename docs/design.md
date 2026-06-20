@@ -12,6 +12,8 @@ v8 changes from v7: the failure-scenario coverage gap for admin operations is cl
 
 v9 changes from v8: idempotency keys for create-type endpoints are derived server-side from each entity's identity-defining fields (a deterministic hash) instead of a client-supplied `Idempotency-Key` header (§11.1, §6, Appendix A/C) — the client carries no key generation/retry-tracking burden. Booking creation (Phase 5) is explicitly flagged as deferred: its natural identity includes a seat-id list, which needs a canonicalization step before the same approach applies cleanly.
 
+v10 changes from v9 (Phase 3 build-time corrections — design doc was incomplete/wrong, fixed during implementation rather than silently worked around): (1) `SEAT_TEMPLATE.price_multiplier` had no base price to multiply against anywhere in the schema — `SHOWTIME` now carries `base_price`, and `SHOWTIME_SEAT.price` is computed as `base_price * price_multiplier` at materialization time (§4.3). (2) The original `DELETE /admin/showtimes/{id}` ("only if no active bookings — synchronous check") didn't fit `SHOWTIME`'s actual shape: a `SHOWTIME` is a single point-in-time screening with no duration/end-date of its own (that's `THEATRE_MOVIE_RUN`/`MOVIE_RELEASE`'s job, §4.4), so there's nothing for an "early end date" to mean at this level, and a synchronous cross-service booking check is pointless before Phase 5 — nothing can be non-`AVAILABLE` yet. Replaced with: `SHOWTIME.is_active` defaults `false` on creation (preventing an accidentally-live showtime), a new `POST /admin/showtimes/{id}/activate` flips it `true`, and `DELETE /admin/showtimes/{id}` now flips it back to `false` rather than removing the row — no hard delete, no row-removal race to guard at all. Seat materialization (§4.3) still happens unconditionally at creation time, before activation, so a showtime can never be activated without a complete seat inventory already in place.
+
 ---
 
 ## 1. Requirements recap
@@ -99,7 +101,9 @@ Cross-service references are plain UUID columns with no DB-enforced constraint, 
 
 ### 4.3 Materializing showtime seats
 
-Theatre service owns the seat layout (`SCREEN → SEAT_LAYOUT → SEAT_TEMPLATE`, real-FK'd within its own DB) and creates `SHOWTIME` rows. When a showtime is created (admin API, §5.5), theatre service calls booking service's idempotent materialize endpoint (§5.3) with the standard §11.3 retry policy (bounded attempts, backoff). **If materialization still fails after retries are exhausted, showtime creation itself fails and returns an error to the admin** — fail-closed, deliberately reusing existing idempotency/retry infrastructure rather than introducing a new "showtime exists but has no seats yet" state. Once materialized, booking service writes its own local `SHOWTIME_SEAT` rows with `label`, `position_x`, `position_y`, `seat_type`, `price` copied in, plus `seat_template_id` retained as a loose reference for the uniqueness guard in §5.3.
+Theatre service owns the seat layout (`SCREEN → SEAT_LAYOUT → SEAT_TEMPLATE`, real-FK'd within its own DB) and creates `SHOWTIME` rows, each carrying its own `base_price` (v10 — see changelog) since `SEAT_TEMPLATE.price_multiplier` has nothing to multiply against on its own. When a showtime is created (admin API, §5.5), theatre service computes each materialized seat's `price` as `base_price * price_multiplier` and calls booking service's idempotent materialize endpoint (§5.3) with the standard §11.3 retry policy (bounded attempts, backoff). **If materialization still fails after retries are exhausted, showtime creation itself fails and returns an error to the admin** — fail-closed, deliberately reusing existing idempotency/retry infrastructure rather than introducing a new "showtime exists but has no seats yet" state. This also guarantees a showtime can never be activated (below) with an incomplete seat inventory. Once materialized, booking service writes its own local `SHOWTIME_SEAT` rows with `label`, `position_x`, `position_y`, `seat_type`, `price` copied in, plus `seat_template_id` retained as a loose reference for the uniqueness guard in §5.3.
+
+A newly created `SHOWTIME` defaults `is_active = false` — it exists and is fully seated, but isn't yet live. A separate `POST /admin/showtimes/{id}/activate` (Appendix C) flips it `true`. `DELETE /admin/showtimes/{id}` flips it back to `false` rather than removing the row — there is no hard delete and no row-removal race to guard against (v10; see changelog for why the original "delete only if no active bookings" contract didn't fit this entity).
 
 ### 4.4 Movie release and end dates
 
@@ -164,6 +168,8 @@ erDiagram
     uuid screen_id FK
     datetime start_time
     boolean is_high_demand
+    float base_price
+    boolean is_active "defaults false, v10"
   }
   SHOWTIME_SEAT {
     uuid id PK
@@ -349,7 +355,7 @@ Primary plus N async read replicas per service; automated failover; strong consi
 | Admin publishes a layout while a showtime using the prior draft is mid-booking | Edge case in the admin authoring workflow | `ACTIVE` layouts are immutable in place — any change requires a new draft + republish, so in-flight bookings are never invalidated mid-flight. |
 | Two admins attempt to open the same draft layout concurrently | Lost-update risk without protection | Draft edit lock (§4.6) — first admin acquires, second is blocked and shown the current holder. |
 | Admin closes browser/loses connection without releasing the draft lock | Lock would otherwise be stuck indefinitely | Heartbeat staleness (§4.6) reclaims it automatically after ~2 minutes of silence — no manual intervention. |
-| Admin attempts to delete a showtime exactly as a booking is being created against it | Check-then-act race between two different services' databases | Synchronous cross-service check at delete time, acceptable given admin-action volume is far below booking-hot-path volume. The larger question — whether showtime removal should ever be a hard delete versus a cancellation workflow with refund/notification consequences once bookings exist — is explicitly out of scope here, not assumed away. |
+| Admin "deletes" a showtime while a booking is in flight against it | N/A as of v10 — `DELETE /admin/showtimes/{id}` only flips `is_active` to `false` (§4.3); there is no row removal and therefore no check-then-act race against another service's database to guard at all | Deactivation just stops the showtime from being surfaced as bookable going forward; it doesn't touch existing `SHOWTIME_SEAT`/booking state. The larger question — what should happen to bookings already made against a showtime that gets deactivated — is the same refund/notification-consequences question already flagged out of scope in §16.6, now framed as "deactivate," not "delete." |
 | Movie or theatre soft-deleted while future showtimes/bookings reference it | Could orphan or retroactively affect existing commitments | Explicitly does not cascade (§4.2) — deactivation affects catalog visibility going forward only; existing showtimes and booking snapshots are unaffected. |
 | Booking service instance crash | In-flight request fails, no orphaned state | Services are stateless; lock expires via TTL. |
 | Postgres primary failover | Brief write unavailability | Standard replica promotion (§12); retries per §11.3. |
@@ -386,8 +392,8 @@ If sweep-lag metrics ever justify it: Redis keyspace notifications bridged throu
 ### 16.5 Theatre-manager role (partial admin scope)
 Deferred until there's a real operator to design the scoping model against.
 
-### 16.6 Showtime cancellation workflow (versus hard delete)
-Flagged in §13 rather than resolved: if a showtime needs to be removed after bookings already exist against it, this likely needs a real cancellation workflow (refunds, notifications) rather than the current "block deletion if bookings exist" rule. Out of scope until refunds/notifications exist to support it.
+### 16.6 Showtime cancellation workflow (versus deactivation)
+Flagged in §13 rather than resolved: as of v10, "deleting" a showtime only flips `is_active` to `false` (§4.3) — there is no hard delete to reconsider. The open question is what *should* happen to bookings that already exist against a showtime that gets deactivated; that likely needs a real cancellation workflow (refunds, notifications) rather than today's "deactivation is silent and has no effect on existing bookings" behavior. Out of scope until refunds/notifications exist to support it.
 
 ---
 
@@ -489,9 +495,10 @@ PATCH  /admin/seat-layouts/draft/{draft_id}/seats              bulk-edit a multi
 POST   /admin/seat-layouts/draft/{draft_id}/publish            finalize, assign to screen, single transaction — requires holding the lock
 POST   /admin/seat-layouts/{layout_id}/clone                   { target_screen_id }
 
-POST   /admin/showtimes                                          create showtime — triggers §4.3 seat materialization, fails closed on exhausted retries
+POST   /admin/showtimes                                          create showtime, always is_active=false — triggers §4.3 seat materialization, fails closed on exhausted retries
 PUT    /admin/showtimes/{showtime_id}
-DELETE /admin/showtimes/{showtime_id}                            only if no active bookings — synchronous check, see §13 for the race-condition caveat
+POST   /admin/showtimes/{showtime_id}/activate                   flips is_active to true (v10)
+DELETE /admin/showtimes/{showtime_id}                             flips is_active back to false — no row removal (v10, see §13/§16.6)
 ```
 
 **Booking service (internal — called by theatre service, not exposed to the admin UI directly)**
