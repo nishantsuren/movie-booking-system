@@ -1,9 +1,0 @@
-.env
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-node_modules/
-*.log
-.DS_Store
-local-cdn-mock/storage/
