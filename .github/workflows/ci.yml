@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shared-lib-tests:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: movieticket
+          POSTGRES_PASSWORD: movieticket_dev_password
+          POSTGRES_DB: catalog_db
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U movieticket"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        working-directory: shared
+        run: pip install -r requirements-dev.txt
+      - name: Run shared library tests
+        working-directory: shared
+        env:
+          TEST_DATABASE_URL: postgresql://movieticket:movieticket_dev_password@localhost:5433/catalog_db
+        run: PYTHONPATH=. pytest tests/ -v
