@@ -13,21 +13,24 @@ See `docs/design.md` for the full architecture this builds toward.
 
 ## What's here
 
-- `docker-compose.yml` — one Postgres container hosting six logical
-  databases (one per service, per the design doc's database-per-service
-  model — see the comment in `infra/postgres/init-databases.sh` for why a
-  single container is the right call locally), one Redis instance, and
-  thin FastAPI stub containers for every backend service plus the routing
-  service. Every container, network, and volume is scoped under the
-  `movieticket_` project name so this never collides with anything else
-  Docker-related already on your machine.
-- `shared/` — the idempotency and auth libraries every service will
-  depend on from Phase 1 onward, each with real tests (not mocked) run
-  against an actual Postgres instance.
-- `routing/` — a working (not just stubbed) path-prefix forwarder. It's
-  cheap to build now and gives a genuine wiring check for the whole stack.
+- `docker-compose.yml` — **Postgres and Redis only.** One Postgres
+  container hosting six logical databases (one per service — see the
+  comment in `infra/postgres/init-databases.sh` for why a single
+  container is the right call locally), one Redis instance. Both scoped
+  under the `movieticket_` project name so this never collides with
+  anything else Docker-related already on your machine.
+- `scripts/dev.sh` — runs every backend service **natively on the host**,
+  not containerized, in one shared virtualenv, against the Dockerized
+  Postgres/Redis above. This is the fast-iteration path: `uvicorn
+  --reload` picks up code changes immediately, no image rebuild between
+  edits. Each service still has its own `Dockerfile`/`requirements.txt`
+  for later containerized deployment (§15 of the design doc) — those
+  just aren't used for local development.
+- `shared/` — the idempotency and auth libraries every service depends
+  on, each with real tests run against an actual Postgres instance.
+- `routing/` — a working (not just stubbed) path-prefix forwarder.
 - Everything else (`services/*`, `apps/*`, `local-cdn-mock/`) is a thin
-  `/health`-only stub. Real logic starts in Phase 1.
+  `/health`-only stub for now. Real logic starts in Phase 1.
 
 ## 1. Isolate this from anything else Docker-related on your machine
 
@@ -40,19 +43,31 @@ Open `.env` and adjust `POSTGRES_HOST_PORT` / `REDIS_HOST_PORT` only if
 deliberately *not* the Postgres/Redis defaults (`5432`/`6379`), specifically
 so this can run alongside an existing local Postgres without touching it.
 
-## 2. Bring up the stack
+## 2. Bring up Postgres and Redis
 
 ```bash
-docker compose up --build
+docker compose up -d
 ```
 
-This builds and starts: Postgres (with six databases created
-automatically on first boot), Redis, all five backend service stubs, the
-local CDN mock, and the routing service.
+This starts only the infrastructure — Postgres (six databases created
+automatically on first boot) and Redis. No backend services are
+containerized.
 
-## 3. Verify it's actually working
+## 3. Run the backend services natively
 
-In a second terminal, once everything reports healthy:
+```bash
+./scripts/dev.sh
+```
+
+This creates a shared `.venv/` on first run, installs every service's
+dependencies into it, and starts all five backend services plus the
+local CDN mock plus the routing service as host processes — each with
+`uvicorn --reload`, logging to `logs/<name>.log`. Leave this running in
+its own terminal; `Ctrl+C` stops everything cleanly.
+
+## 4. Verify it's actually working
+
+In a third terminal:
 
 ```bash
 # Each service directly
@@ -63,14 +78,14 @@ curl http://localhost:8004/health   # payment
 curl http://localhost:8005/health   # user
 curl http://localhost:8006/health   # local-cdn-mock
 
-# Through the routing service (proves cross-container networking works,
-# not just that each container starts)
-curl http://localhost:8000/health            # routing's own health
-curl http://localhost:8000/catalog/health    # forwarded to catalog
-curl http://localhost:8000/theatre/health    # forwarded to theatre
-curl http://localhost:8000/booking/health    # forwarded to booking
-curl http://localhost:8000/payment/health    # forwarded to payment
-curl http://localhost:8000/user/health       # forwarded to user
+# Through the routing service (proves it can resolve and reach every
+# other service on localhost, not just that each one boots)
+curl http://localhost:8000/health
+curl http://localhost:8000/catalog/health
+curl http://localhost:8000/theatre/health
+curl http://localhost:8000/booking/health
+curl http://localhost:8000/payment/health
+curl http://localhost:8000/user/health
 
 # Confirm Postgres has all six databases
 docker exec movieticket_postgres psql -U movieticket -d postgres -c "\l" | grep _db
@@ -79,19 +94,17 @@ docker exec movieticket_postgres psql -U movieticket -d postgres -c "\l" | grep 
 docker exec movieticket_redis redis-cli ping
 ```
 
-Every `/health` call should return `{"status":"ok",...}`. The forwarded
-calls succeeding is the real proof here — it means containers can resolve
-and reach each other by service name on the `movieticket_net` network, not
-just that each one boots in isolation.
+Every `/health` call should return `{"status":"ok",...}`.
 
-## 4. Run the shared library tests
+## 5. Run the shared library tests
 
 These run on your host machine against the Dockerized Postgres (so bring
-the stack up first):
+the stack up first — step 2 is enough, `dev.sh` doesn't need to be
+running for this):
 
 ```bash
 cd shared
-pip install -r requirements-dev.txt   # or use a venv, your call
+pip install -r requirements-dev.txt   # or reuse the .venv from dev.sh
 PYTHONPATH=. pytest tests/ -v
 ```
 
@@ -102,10 +115,12 @@ rejection (§3.2). These are the two Phase 0 verification criteria from
 the implementation plan, and they're the same tests CI (`.github/workflows/ci.yml`)
 runs on every push.
 
-## 5. Tear down
+## 6. Tear down
 
 ```bash
-docker compose down          # stop and remove containers, keep data
+# Stop the native services: Ctrl+C in the dev.sh terminal
+
+docker compose down          # stop and remove Postgres/Redis containers, keep data
 docker compose down -v       # also remove the Postgres volume — full reset
 ```
 

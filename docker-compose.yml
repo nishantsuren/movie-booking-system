@@ -10,9 +10,9 @@ services:
       - "${POSTGRES_HOST_PORT}:5432"
     volumes:
       - movieticket_pg_data:/var/lib/postgresql/data
-      - ./infra/postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh
+      - ./infra/postgres/init-databases.sql:/docker-entrypoint-initdb.d/init-databases.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d postgres"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -27,100 +27,6 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
-
-  catalog:
-    build: ./services/catalog
-    container_name: movieticket_catalog
-    environment:
-      AUTH_ENABLED: ${AUTH_ENABLED}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/catalog_db
-    ports:
-      - "8001:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  theatre:
-    build: ./services/theatre
-    container_name: movieticket_theatre
-    environment:
-      AUTH_ENABLED: ${AUTH_ENABLED}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/theatre_db
-      BOOKING_SERVICE_URL: http://booking:8000
-    ports:
-      - "8002:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  booking:
-    build: ./services/booking
-    container_name: movieticket_booking
-    environment:
-      AUTH_ENABLED: ${AUTH_ENABLED}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/booking_db
-      REDIS_URL: redis://redis:6379
-    ports:
-      - "8003:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-
-  payment:
-    build: ./services/payment
-    container_name: movieticket_payment
-    environment:
-      AUTH_ENABLED: ${AUTH_ENABLED}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/payment_db
-    ports:
-      - "8004:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  user:
-    build: ./services/user
-    container_name: movieticket_user
-    environment:
-      AUTH_ENABLED: ${AUTH_ENABLED}
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/user_db
-    ports:
-      - "8005:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  local-cdn-mock:
-    build: ./local-cdn-mock
-    container_name: movieticket_local_cdn_mock
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/asset_db
-    ports:
-      - "8006:8000"
-    depends_on:
-      postgres:
-        condition: service_healthy
-
-  routing:
-    build: ./routing
-    container_name: movieticket_routing
-    environment:
-      AUTH_ENABLED: ${AUTH_ENABLED}
-      CATALOG_SERVICE_URL: http://catalog:8000
-      THEATRE_SERVICE_URL: http://theatre:8000
-      BOOKING_SERVICE_URL: http://booking:8000
-      PAYMENT_SERVICE_URL: http://payment:8000
-      USER_SERVICE_URL: http://user:8000
-    ports:
-      - "8000:8000"
-    depends_on:
-      - catalog
-      - theatre
-      - booking
-      - payment
-      - user
 
 volumes:
   movieticket_pg_data:

@@ -1,77 +1,61 @@
 # Movie ticket booking system — Claude Code project guide
 
-This file is read automatically at the start of every Claude Code session
-in this repo. Keep it current — if conventions change, update this file
-in the same session, not as an afterthought.
+Read automatically every session. Keep current — update in the same
+session conventions change, not as an afterthought.
 
-## What this project is
+## Project
 
-A BookMyShow-style movie ticket booking platform, built as Python/FastAPI
-microservices with database-per-service. Full architecture, rationale,
-and every design tradeoff made along the way: `docs/design.md`. Phased
-build order with per-phase scope and verification criteria:
-`docs/implementation-plan.md`. **Read both before starting any work in
-this repo, every session** — don't rely on conversation memory.
+BookMyShow-style booking platform: Python/FastAPI microservices,
+database-per-service. Architecture/rationale: `docs/design.md`. Phased
+build order + verification criteria: `docs/implementation-plan.md`.
+**Read both every session** before starting work — don't rely on
+conversation memory.
 
 ## Current state
 
-Phase 0 (foundation scaffolding) is complete and verified: Docker Compose
-stack (Postgres with six logical databases, Redis, thin FastAPI stub
-services, a working routing service), plus `shared/idempotency` and
-`shared/auth` with real tests passing against actual Postgres.
+Phase 0 (foundation scaffolding) complete & verified: Postgres (six
+logical DBs) + Redis via `docker compose up -d`; every backend service
+runs natively via `scripts/dev.sh`, not containerized (see Service shape
+below); `shared/idempotency` + `shared/auth` have tests passing against
+real Postgres.
 
-**Update this section at the end of every session** with which phase is
-now complete, so the next session — yours or a human's — knows where
-things stand without re-deriving it from git history.
+**Update this section at session-end** with the now-completed phase.
 
-## Conventions established in Phase 0 — reuse these, don't reinvent them
+## Conventions (Phase 0) — reuse, don't reinvent
 
-- **Database access**: plain `psycopg2`, not an ORM. Stay consistent
-  unless there's a real reason to switch — raise it explicitly if you
-  think there is, don't switch silently mid-project.
-- **Migrations**: numbered SQL files (e.g. `infra/migrations/001_*.sql`)
-  applied in order by a small script, tracked via a `schema_migrations`
-  table per database. No migration framework — keep it as plain as the
-  rest of the data-access layer.
-- **Idempotency**: `shared/idempotency/idempotency.py` implements the
-  `INSERT ... ON CONFLICT` pattern from design doc §11.1. Every new
-  mutating endpoint that creates a resource should use this, not a
-  parallel mechanism.
-- **Auth**: `shared/auth/auth.py` implements the `AUTH_ENABLED` toggle
-  (§3.2) — `get_auth_context` and `require_role(...)` as FastAPI
-  dependencies. Every new endpoint, customer or admin, should use these.
-- **Events**: `shared/events/events.py` — `EventPublisher` interface,
-  `LoggingEventPublisher` as the no-op implementation until Phase 13.
-- **Testing**: anything touching the database is tested against the real
-  Dockerized Postgres, never mocked — see `shared/tests/` for the
-  established pattern. This matters most for the concurrency-sensitive
-  phases (4, 5, 6) where a mock would hide the exact bugs the tests exist
-  to catch.
-- **Service shape**: each backend service is its own FastAPI app under
-  `services/<name>/`, with its own `Dockerfile` and `requirements.txt`,
-  registered in `docker-compose.yml`.
+- **DB access**: plain `psycopg2`, no ORM. Flag explicitly before switching.
+- **Migrations**: numbered SQL files (`infra/migrations/001_*.sql`),
+  applied in order by a script, tracked via per-DB `schema_migrations`
+  table. No framework.
+- **Idempotency**: `shared/idempotency/idempotency.py`
+  (`INSERT...ON CONFLICT`, design §11.1). Use for every new
+  resource-creating endpoint.
+- **Auth**: `shared/auth/auth.py` — `AUTH_ENABLED` toggle (§3.2),
+  `get_auth_context`/`require_role(...)` deps. Use on every new endpoint.
+- **Events**: `shared/events/events.py` — `EventPublisher` interface;
+  `LoggingEventPublisher` no-op until Phase 13.
+- **Testing**: DB-touching tests run against real Dockerized Postgres,
+  never mocked (`shared/tests/` pattern) — critical for concurrency
+  phases (4, 5, 6).
+- **Service shape**: each backend service = own FastAPI app in
+  `services/<name>/`, own Dockerfile + requirements.txt (for later
+  containerized deployment, §15). `docker-compose.yml` is **Postgres +
+  Redis only** — services run natively on the host via `scripts/dev.sh`
+  for fast iteration (no image rebuild per change). Don't add services
+  to `docker-compose.yml`; add new ones to `scripts/dev.sh`'s
+  `start_service` calls, following the existing env-var pattern
+  (`DATABASE_URL` built from `.env`'s Postgres settings, pointed at the
+  service's own logical database).
 
 ## Working process
 
-- **One implementation-plan phase per session.** State which phase at
-  the start, re-read its scope and verification criteria in
-  `docs/implementation-plan.md`, and stay inside that boundary — don't
-  drift into a later phase's endpoints or features even when related work
-  makes it tempting. Flag the temptation instead of acting on it.
-- **Write and run the tests specified in that phase's verification
-  criteria** — they're already defined in the implementation plan, don't
-  invent a different test plan. Show the actual test output before
-  declaring a phase done, not just a description of what the tests would
-  check.
-- **If `docs/design.md` turns out to be wrong, incomplete, or impractical
-  once you're actually building it, say so explicitly and propose the
-  specific edit.** This has already happened several times during design
-  (the seat-uniqueness index was wrong in an early revision and got
-  corrected after implementation-level scrutiny) — expect the same during
-  build, and treat it as the process working correctly, not as a problem
-  to hide.
-- **Commit at the end of each phase**, once its verification criteria
-  pass, with a message referencing the phase number. This is what makes
-  "independently testable per phase" actually useful in practice — a
-  clean rollback point if a later phase reveals a problem with an earlier
-  one.
+- **One phase per session**: state the phase, re-read its scope/verification
+  in the implementation plan, stay inside it — flag drift temptation
+  instead of acting on it.
+- **Run the phase's specified verification tests**, don't invent new
+  ones. Show actual output before declaring done.
+- **If design.md is wrong/impractical, say so + propose the fix**
+  (has happened before, e.g. seat-uniqueness index) — that's the process
+  working, not a problem to hide.
+- **Commit at end of each phase** (after verification passes), message
+  references the phase number.
