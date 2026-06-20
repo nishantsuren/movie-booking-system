@@ -13,11 +13,15 @@ conversation memory.
 
 ## Current state
 
-Phase 0 (foundation scaffolding) complete & verified: Postgres (six
-logical DBs) + Redis via `docker compose up -d`; every backend service
-runs natively via `scripts/dev.sh`, not containerized (see Service shape
-below); `shared/idempotency` + `shared/auth` have tests passing against
-real Postgres.
+Phase 1 complete & verified: catalog (`MOVIE`/`MOVIE_RELEASE`) and
+theatre (`CITY`/`THEATRE`/`SCREEN`) have real schemas, browse + admin
+CRUD (Appendix A/C, `AUTH_ENABLED`-gated), local CDN mock has a real
+`ASSET` upload/serve API; migrations via `infra/migrations/run_migrations.py`
+(per-service numbered SQL); `infra/seed/seed.py` seeds idempotently.
+`tests/integration/test_phase1.py` passes against the real stack. Notes:
+catalog's `?city=` filter uses theatre's `city_id` directly, no local
+`CITY` copy yet (defer to Phase 13's event bus); added
+`GET /theatres?city=` (gap in Appendix A).
 
 **Update this section at session-end** with the now-completed phase.
 

@@ -34,18 +34,24 @@ done
 
 mkdir -p logs
 PIDS=()
+REPO_ROOT="$(pwd)"
 
 start_service () {
   local name="$1" dir="$2" port="$3"
   shift 3
   echo "Starting $name on :$port (log: logs/$name.log)"
-  (cd "$dir" && env "$@" uvicorn main:app --host 0.0.0.0 --port "$port" --reload) \
+  (cd "$dir" && env "$@" PYTHONPATH="$REPO_ROOT" uvicorn main:app --host 0.0.0.0 --port "$port" --reload) \
     > "logs/$name.log" 2>&1 &
   PIDS+=($!)
 }
 
 PG="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_HOST_PORT}"
 REDIS="redis://localhost:${REDIS_HOST_PORT}"
+
+echo "Applying migrations..."
+python infra/migrations/run_migrations.py catalog "$PG/catalog_db"
+python infra/migrations/run_migrations.py theatre "$PG/theatre_db"
+python infra/migrations/run_migrations.py asset "$PG/asset_db"
 
 start_service catalog services/catalog 8001 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/catalog_db"
