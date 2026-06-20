@@ -13,18 +13,18 @@ conversation memory.
 
 ## Current state
 
-Phase 1 complete & verified: catalog (`MOVIE`/`MOVIE_RELEASE`) and
-theatre (`CITY`/`THEATRE`/`SCREEN`) have real schemas, browse + admin
-CRUD (Appendix A/C, `AUTH_ENABLED`-gated), local CDN mock has a real
-`ASSET` upload/serve API; migrations via `infra/migrations/run_migrations.py`
-(per-service numbered SQL); `infra/seed/seed.py` seeds idempotently.
-`tests/integration/test_phase1.py` passes against the real stack. Notes:
-catalog's `?city=` filter uses theatre's `city_id` directly, no local
-`CITY` copy yet (defer to Phase 13's event bus); added
-`GET /theatres?city=` (gap in Appendix A); idempotency keys for create
-endpoints are server-derived from identity fields, not a client header
-(design v9, §11.1) — revisit for booking (Phase 5), whose identity
-includes a seat-id list.
+Phase 2 complete & verified: theatre service has `SEAT_LAYOUT`/
+`SEAT_TEMPLATE` (§4.5, freeform) + draft create/edit/publish/clone +
+§4.6 draft lock (acquire/heartbeat/release, ~2min staleness, no sweep).
+`tests/integration/test_phase2.py` (11 tests) passes. Notes: draft
+creation has no idempotency key (confirmed w/ user — screen_id+name
+isn't a safe dedup key across re-edit cycles, same issue as deferred
+BOOKING in §11.1); lock-gated endpoints identify caller via JWT `sub`
+when `AUTH_ENABLED=true` else required `X-Admin-User-Id` header (no
+real users until Phase 7) — see `_get_admin_identity` in
+`services/theatre/main.py`. Carries forward from Phase 1: catalog's
+`?city=` filter uses theatre's `city_id` directly (no local `CITY`
+copy till Phase 13); `GET /theatres?city=` added (Appendix A gap).
 
 **Update this section at session-end** with the now-completed phase.
 
