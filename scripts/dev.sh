@@ -63,6 +63,7 @@ python infra/migrations/run_migrations.py theatre "$PG/theatre_db"
 python infra/migrations/run_migrations.py asset "$PG/asset_db"
 python infra/migrations/run_migrations.py booking "$PG/booking_db"
 python infra/migrations/run_migrations.py payment "$PG/payment_db"
+python infra/migrations/run_migrations.py user "$PG/user_db"
 
 start_service catalog services/catalog 8001 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/catalog_db"

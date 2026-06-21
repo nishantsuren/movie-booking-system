@@ -13,28 +13,27 @@ conversation memory.
 
 ## Current state
 
-Phase 6 complete & verified: reconciliation sweep worker
-(`services/booking/adapters/reconciliation_sweep.py`) -- standalone
-process, single active instance via Postgres advisory lock, N standbys;
-runs as 2 replicas in dev.sh. Design fixes (changelog): v13, Phase 5
-never implemented §5.4's read-time-reconciliation for booking creation
-(fixed). v14 (the big one): `confirm()` used to self-police wall-clock
-expiry, which made §5.4's required test 3 ("confirm always wins vs the
-sweep") impossible -- same clock comparison as the sweep's own
-candidate-select, so confirm always rejected first. Fixed by dropping
-confirm's clock checks entirely; sweep is now the sole timing authority,
-confirm wins any race it reaches the DB for first, even past
-expires_at. Retired Phase 5's `test_confirm_fails_after_hold_expires`;
-equivalent behavior now in `test_phase6.py`. `test_phase6.py` (6 tests,
-incl. §5.4's 5 required ones verbatim) + full regression (43 tests)
-pass. Gotcha: psycopg2 adapts a list to `text[]` not `uuid[]` -- always
-`id::text = ANY(%s)` against a uuid column. Carries forward:
+Phase 7 complete & verified: user service -- `app_user` table
+(`"user"` is a reserved Postgres keyword, hence the name) with `role`
+(CUSTOMER|ADMIN); `POST /auth/register` (bcrypt hash, email is the
+natural idempotency key but a duplicate is a 409, not a silent
+idempotent-replay -- password isn't part of the dedup key, so silently
+returning the first registrant's row would be a real bug, not a
+harmless retry); `POST /auth/login` issues a JWT via shared/auth/auth.py's
+existing JWT_SECRET/JWT_ALGORITHM (no second auth scheme); `GET
+/users/{id}`. `AUTH_ENABLED` stays `false` everywhere (Phase 10's job).
+`tests/integration/test_phase7.py` (7 tests) + full regression across
+all 7 phases (50 tests): 48 passed, 2 skipped (pre-existing self-skipping
+fail-closed tests from Phases 3/5, unrelated to this phase, already
+verified for real elsewhere) -- confirms nothing built so far
+accidentally started requiring a token. Carries forward: sweep worker
+(Phase 6, `services/booking/adapters/reconciliation_sweep.py`, v13/v14);
 `RedisSeatLocker`/hash-tagged keys (v11); `SHOWTIME.base_price` (v10);
 pre-existing Phase-2 gap (publish never deactivates prior ACTIVE
 layout); draft creation has no idempotency key; lock-gated endpoints
-use JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id` (no real
-users until Phase 7); catalog's `?city=` uses theatre's `city_id`
-directly (no local `CITY` copy till Phase 13).
+use JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id`; catalog's
+`?city=` uses theatre's `city_id` directly (no local `CITY` copy till
+Phase 13).
 
 **Update this section at session-end** with the now-completed phase.
 
