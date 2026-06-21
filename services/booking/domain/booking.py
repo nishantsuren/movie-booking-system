@@ -4,7 +4,7 @@ state transitions are conditional SQL UPDATEs in the Postgres adapters
 in this codebase treats its database as the actual state machine.
 """
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from enum import Enum
 
 
@@ -41,9 +41,6 @@ class Booking:
             expires_at=row["expires_at"],
         )
 
-    def is_expired(self) -> bool:
-        return self.expires_at < datetime.now(timezone.utc)
-
 
 class ShowtimeNotMaterialized(LookupError):
     """No SHOWTIME_META / SHOWTIME_SEAT rows for this showtime_id -- it was
@@ -66,9 +63,9 @@ class InvalidBookingState(RuntimeError):
 
 
 class BookingHoldExpired(RuntimeError):
-    """Booking is still nominally PENDING (no sweep worker yet, Phase 6)
-    but its hold has passed expires_at -- treated as expired on read,
-    matching §5.4's read-time reconciliation principle."""
+    """The sweep worker (§5.4) has already flipped this booking to
+    EXPIRED -- confirm no longer self-polices wall-clock expiry (v14),
+    so this only fires once something has actually acted on it."""
 
 
 class ConfirmConflict(RuntimeError):

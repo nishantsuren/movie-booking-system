@@ -166,19 +166,6 @@ def pay(routing, booking_id: str, amount: float) -> str:
     return resp.json()["id"]
 
 
-def backdate_booking_and_seats(booking_db, booking_id: str, minutes_ago: float) -> None:
-    with booking_db.cursor() as cur:
-        cur.execute(
-            "UPDATE booking SET expires_at = now() - INTERVAL '1 minute' * %s WHERE id = %s",
-            (minutes_ago, booking_id),
-        )
-        cur.execute(
-            "UPDATE showtime_seat SET lock_expires_at = now() - INTERVAL '1 minute' * %s WHERE locked_by_booking_id = %s",
-            (minutes_ago, booking_id),
-        )
-    booking_db.commit()
-
-
 # --- happy path ---
 
 def test_happy_path_browse_select_pending_pay_confirm_booked(routing, booking_db):
@@ -239,26 +226,17 @@ def test_two_booking_attempts_for_same_seat_one_succeeds_one_409(routing, bookin
 
 
 # --- expired lock ---
-
-def test_confirm_fails_after_hold_expires(routing, booking_db):
-    seats = [make_seat("A1", 0, 0)]
-    showtime, _layout = make_showtime_with_seats(routing, seats, base_price=50.0)
-    seat_ids = showtime_seat_ids_by_label(booking_db, showtime["id"])
-    a1 = seat_ids["A1"]
-
-    create_resp = create_booking(routing, showtime["id"], [a1])
-    booking = create_resp.json()
-    booking_id = booking["id"]
-    payment_id = pay(routing, booking_id, booking["price_paid"])
-
-    backdate_booking_and_seats(booking_db, booking_id, minutes_ago=11)
-
-    confirm_resp = routing.post(f"/booking/bookings/{booking_id}/confirm", json={"payment_id": payment_id})
-    assert confirm_resp.status_code == 409, confirm_resp.text
-    assert "expired" in confirm_resp.text.lower()
-
-    get_resp = routing.get(f"/booking/bookings/{booking_id}")
-    assert get_resp.json()["status"] == "PENDING", "an expired-but-unswept booking is still nominally PENDING (Phase 6 sweep doesn't exist yet)"
+#
+# A prior version of this section had a test asserting confirm() itself
+# rejects a booking once now() > expires_at. That premise only held
+# because nothing else ever invalidated a stale hold -- Phase 6 (design
+# v14) gave that wall-clock authority to the sweep worker exclusively, so
+# confirm() now gates purely on state (PENDING/LOCKED) and a confirm that
+# reaches the database before the sweep's own pass always wins, even past
+# expires_at. The equivalent (now two-part) behavior -- unswept expiry
+# doesn't block confirm; confirm fails once the sweep has actually run --
+# is covered in tests/integration/test_phase6.py, in the environment that
+# already controls the sweep deterministically (this module doesn't).
 
 
 # --- idempotency ---

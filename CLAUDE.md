@@ -13,28 +13,28 @@ conversation memory.
 
 ## Current state
 
-Phase 5 complete & verified: `BOOKING` + full saga (select seats ->
-PENDING -> mocked payment -> confirm -> BOOKED) via `BookingOrchestrator`
-(`services/booking/{domain,application,adapters}/`); payment service
-built out for real. Design v12 fixes (see design.md changelog): booking
-idempotency key = hash(showtime_id+user_id+sorted seat_ids) via a
-**partial** unique index (`WHERE status IN (PENDING,CONFIRMED)`, not
-plain -- same triple is a legitimate recurring identity); `movie_title`
-has no other path into BOOKING's snapshot, so admin now supplies it at
-showtime-creation (same trust tier as movie_id), passed through
-materialize-seats into a local `SHOWTIME_META` cache -- zero live
-cross-service calls on the booking hot path. `confirm`'s sole
-concurrency guard is the SHOWTIME_SEAT PK-scoped conditional update
-(§5.6), not a separate booking-row lock. `tests/integration/test_phase5.py`
-(8 tests, 1 verified for real w/ payment stopped) + full regression (38
-tests) pass. Showtime-deletion-race test dropped per v10 (no row removal
-to race against). Carries forward: `RedisSeatLocker`/hash-tagged keys
-(Phase 4, v11); `SHOWTIME.base_price` (Phase 3, v10); pre-existing
-Phase-2 gap (publish never deactivates a screen's prior ACTIVE layout,
-still unfixed); draft creation has no idempotency key; lock-gated
-endpoints use JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id`
-(no real users until Phase 7); catalog's `?city=` uses theatre's
-`city_id` directly (no local `CITY` copy till Phase 13).
+Phase 6 complete & verified: reconciliation sweep worker
+(`services/booking/adapters/reconciliation_sweep.py`) -- standalone
+process, single active instance via Postgres advisory lock, N standbys;
+runs as 2 replicas in dev.sh. Design fixes (changelog): v13, Phase 5
+never implemented §5.4's read-time-reconciliation for booking creation
+(fixed). v14 (the big one): `confirm()` used to self-police wall-clock
+expiry, which made §5.4's required test 3 ("confirm always wins vs the
+sweep") impossible -- same clock comparison as the sweep's own
+candidate-select, so confirm always rejected first. Fixed by dropping
+confirm's clock checks entirely; sweep is now the sole timing authority,
+confirm wins any race it reaches the DB for first, even past
+expires_at. Retired Phase 5's `test_confirm_fails_after_hold_expires`;
+equivalent behavior now in `test_phase6.py`. `test_phase6.py` (6 tests,
+incl. §5.4's 5 required ones verbatim) + full regression (43 tests)
+pass. Gotcha: psycopg2 adapts a list to `text[]` not `uuid[]` -- always
+`id::text = ANY(%s)` against a uuid column. Carries forward:
+`RedisSeatLocker`/hash-tagged keys (v11); `SHOWTIME.base_price` (v10);
+pre-existing Phase-2 gap (publish never deactivates prior ACTIVE
+layout); draft creation has no idempotency key; lock-gated endpoints
+use JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id` (no real
+users until Phase 7); catalog's `?city=` uses theatre's `city_id`
+directly (no local `CITY` copy till Phase 13).
 
 **Update this section at session-end** with the now-completed phase.
 

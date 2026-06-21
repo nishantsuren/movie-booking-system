@@ -73,7 +73,12 @@ class BookingOrchestrator:
         missing = [sid for sid in seat_ids if sid not in found]
         if missing:
             raise SeatsUnavailable(missing)
-        not_available = [sid for sid in seat_ids if found[sid]["status"] != "AVAILABLE"]
+        # §5.4 read-time reconciliation: a LOCKED seat past its
+        # lock_expires_at reads as available even if the sweep worker
+        # hasn't physically flipped it back yet -- is_effectively_available
+        # is computed server-side (postgres_seat_repository.py) using the
+        # same rule lock_seats's own conditional UPDATE enforces.
+        not_available = [sid for sid in seat_ids if not found[sid]["is_effectively_available"]]
         if not_available:
             raise SeatsUnavailable(not_available)
 
@@ -106,6 +111,16 @@ class BookingOrchestrator:
         return booking
 
     def confirm(self, booking_id: str, payment_id: str) -> Booking:
+        """Phase 6 (v14): confirm's only gate is the booking/seat *state*
+        (PENDING/LOCKED) -- no clock comparison of its own. Before the
+        sweep worker existed, confirm had to self-police expires_at, since
+        nothing else ever would; now that it does, the sweep is the sole
+        wall-clock authority (§5.4), and confirm just races to update
+        first. A confirm that reaches the database before the sweep's own
+        pass does always wins, even a moment past expires_at -- a
+        customer who pays right at the wire, just ahead of the sweep's
+        15-30s poll interval, completes their purchase rather than being
+        rejected on a technicality nothing has actually acted on yet."""
         booking = self._bookings.get(booking_id)
         if booking is None:
             raise BookingNotFound(booking_id)
@@ -113,8 +128,6 @@ class BookingOrchestrator:
             return booking  # idempotent replay -- no re-execution (§11.1)
         if booking.status.value != "PENDING":
             raise InvalidBookingState(f"cannot confirm booking in status {booking.status.value}")
-        if booking.is_expired():
-            raise BookingHoldExpired(booking_id)
 
         payment = self._payments.get_payment(payment_id)  # may raise PaymentNotFound / PaymentServiceUnavailable
         if payment.booking_id != booking_id or payment.status != "SUCCESS":
@@ -125,8 +138,8 @@ class BookingOrchestrator:
             fresh = self._bookings.get(booking_id)
             if fresh.status.value == "CONFIRMED":
                 return fresh  # lost the race to a concurrent confirm (§5.6) -- idempotent
-            if fresh.is_expired():
-                raise BookingHoldExpired(booking_id)
+            if fresh.status.value == "EXPIRED":
+                raise BookingHoldExpired(booking_id)  # the sweep got there first
             raise ConfirmConflict(booking_id)
 
         confirmed = self._bookings.mark_confirmed(booking_id)

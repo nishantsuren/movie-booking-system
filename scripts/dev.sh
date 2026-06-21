@@ -45,6 +45,15 @@ start_service () {
   PIDS+=($!)
 }
 
+start_worker () {
+  local name="$1" dir="$2" module="$3"
+  shift 3
+  echo "Starting $name (log: logs/$name.log)"
+  (cd "$dir" && env "$@" PYTHONPATH="$REPO_ROOT" python "$module") \
+    > "logs/$name.log" 2>&1 &
+  PIDS+=($!)
+}
+
 PG="postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@localhost:${POSTGRES_HOST_PORT}"
 REDIS="redis://localhost:${REDIS_HOST_PORT}"
 
@@ -68,6 +77,13 @@ start_service booking services/booking 8003 \
 
 start_service payment services/payment 8004 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/payment_db"
+
+# §5.4: N replicas, exactly one ever active via the Postgres advisory
+# lock -- 2 here is enough to demonstrate the failover property locally.
+start_worker reconciliation-sweep-1 services/booking adapters/reconciliation_sweep.py \
+  DATABASE_URL="$PG/booking_db"
+start_worker reconciliation-sweep-2 services/booking adapters/reconciliation_sweep.py \
+  DATABASE_URL="$PG/booking_db"
 
 start_service user services/user 8005 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/user_db"
