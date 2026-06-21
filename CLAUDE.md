@@ -13,43 +13,43 @@ conversation memory.
 
 ## Current state
 
-Phase 8 complete & verified: customer SPA (`apps/customer-web/`,
-React+Vite+TypeScript, confirmed with user) -- browse/showtimes/seatmap/
-booking/mocked-payment/confirmation, calling only through the routing
-service, bundle built and deployed into `local-cdn-mock/static/customer/`
-(`npm run build:deploy`), never served from the Vite dev server for
-testing. `VITE_API_BASE_URL` env-configured (§3.2), never hardcoded.
-Backend gap filled first (frontend structurally needed it): `GET
-/cities`, `GET /showtimes/{id}` (theatre, plain), enriched `GET
-/movies/{id}/showtimes?city=&date=` (theatre, one live catalog call/request)
-and `GET /showtimes/{id}/seatmap` (booking, wrapped with movie/theatre/
-screen/time/price from `SHOWTIME_META`, extended at materialize time --
-v16, see design.md). Three real infra bugs a browser caught that curl
-couldn't: routing had no CORS headers (browser silently blocks
-cross-origin responses; curl never enforces CORS); local-cdn-mock's
-`StaticFiles` had no SPA fallback (client-side routes 404'd on direct
-nav); Vite's default `assets/` build dir collided with the existing
-`GET /assets/{asset_id}` route (422s parsing bundle filenames as UUIDs)
--- fixed via `vite.config.ts`'s `assetsDir`, not the API contract.
-Countdown UX (confirmed w/ user, conditional on the no-double-booking
-guarantee already proven in Phases 4/6): communicates the post-v14
-grace window explicitly rather than asserting a hard deadline.
-Playwright E2E suite (`apps/customer-web/e2e/`, chosen over Cypress for
-native multi-context support, needed for the seat-conflict test): happy
-path, seat-conflict (two real browser contexts, found and fixed a test
-bug -- `waitForURL` trivially matches a URL the page is already on, use
-`waitForResponse` for race assertions instead), payment failure (route
-interception -- backend failure already proven for real in
-`test_phase5.py`, this tests the frontend's rendering), and both
-countdown-grace-window outcomes (one waits ~29s for the real live sweep
-worker). All 5 pass; full backend regression (50 tests) still 48
-passed/2 skipped, unaffected. Carries forward: sweep worker (Phase 6,
-v13/v14); `RedisSeatLocker`/hash-tagged keys (v11); `SHOWTIME.base_price`
-(v10); pre-existing Phase-2 gap (publish never deactivates prior ACTIVE
-layout); draft creation has no idempotency key; lock-gated endpoints use
-JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id`; catalog's
-`?city=` uses theatre's `city_id` directly (no local `CITY` copy till
-Phase 13).
+Phase 9 complete & verified: admin SPA (`apps/admin-web/`,
+React+Vite+TypeScript, served under `/admin/` -- needs `base: '/admin/'`
+in `vite.config.ts`, unlike customer-web at the root) -- CRUD for
+movies/releases/theatres/screens/showtimes (Activate/Deactivate, not
+Delete, per design), plus the seat-layout canvas editor (§4.5: line/
+grid/curve/single-seat placement tools, multi-select + bulk edit) with
+full draft-lock UX (§4.6: held/blocked-with-holder-identity/stale
+banners, 25s heartbeat, explicit release button). Six admin list/get
+endpoints were missing and had to be added first (catalog
+`GET /admin/movies`+`/releases`; theatre `GET /admin/theatres/{id}/screens`,
+`/admin/screens/{id}/seat-layouts`, `/admin/seat-layouts/{id}`,
+`/admin/screens/{id}/showtimes`) -- design v17. Confirmed (not assumed)
+Phase 8's CORS/SPA-fallback fixes already cover admin-web's own origin
+and `/admin` path prefix; needed its own `assetsDir: 'app-assets'` fix
+for the same Vite/`/assets`-route collision as customer-web. Two real
+bugs caught by writing the E2E tests (both fixed, see design v17 and
+git history, not repeated here): a UI race where create-forms could
+submit with an empty FK before their dependent dropdown finished
+loading (now disabled until ready, affects any future picker-backed
+form); and the grid placement tool's row-labelling, which collapsed
+every row to the same label. Two required E2E tests both pass for real:
+cross-app integration (author a 152-seat layout via all four tools
+through the canvas, publish, schedule+activate a showtime, confirm it
+renders correctly in customer-web's seatmap, a different app/origin
+entirely) and concurrent-edit (two real browser contexts, second
+session blocked with the holder's identity shown, proceeds after either
+explicit release or simulated staleness). Full backend regression still
+48 passed/2 skipped; customer-web's own Phase-8 E2E suite (5 tests)
+re-verified passing, unaffected by the shared-infra changes. Carries
+forward from Phase 8: backend gap-filling pattern repeats here (an admin
+UI structurally needs to list what it manages); draft creation still has
+no idempotency key (same reasoning as before); lock-gated endpoints use
+JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id` (no real users
+until Phase 10). Also still carried forward: sweep worker (Phase 6,
+v13/v14); `RedisSeatLocker`/hash-tagged keys (v11); pre-existing Phase-2
+gap (publish never deactivates prior ACTIVE layout); catalog's `?city=`
+uses theatre's `city_id` directly (no local `CITY` copy till Phase 13).
 
 **Update this section at session-end** with the now-completed phase.
 

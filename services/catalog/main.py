@@ -121,6 +121,21 @@ def get_movie(movie_id: UUID, conn=Depends(get_db)) -> dict:
 
 # --- admin endpoints (Appendix C) ---
 
+@app.get("/admin/movies")
+def list_movies_for_admin(conn=Depends(get_db), _ctx: AuthContext = Depends(require_role("ADMIN"))) -> list[dict]:
+    """Phase 9: admin management needs to see every movie, including
+    deactivated ones (to reactivate, or just to know they exist) --
+    GET /movies (customer browse) always filters to is_active=TRUE even
+    with no city given, so it can't serve this. New endpoint rather than
+    an `include_inactive` flag on the customer one, since the two have
+    genuinely different audiences and the customer contract (Appendix A)
+    shouldn't grow an admin-only parameter."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM movie ORDER BY title")
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.post("/admin/movies", status_code=201)
 def create_movie(
     body: MovieCreate,
@@ -184,6 +199,22 @@ def delete_movie(
             (str(movie_id),),
         )
     conn.commit()
+
+
+@app.get("/admin/movies/{movie_id}/releases")
+def list_releases_for_movie(
+    movie_id: UUID,
+    conn=Depends(get_db),
+    _ctx: AuthContext = Depends(require_role("ADMIN")),
+) -> list[dict]:
+    """Phase 9: the admin edit form needs to show existing releases (to
+    edit one, you need its release_id, which only ever existed in a
+    create-response until now)."""
+    _get_movie_or_404(conn, movie_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM movie_release WHERE movie_id = %s ORDER BY release_date", (str(movie_id),))
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 @app.post("/admin/movies/{movie_id}/releases", status_code=201)

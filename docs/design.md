@@ -26,6 +26,8 @@ v15 changes from v14 (Phase 7): `USER` is implemented as a table literally named
 
 v16 changes from v15 (Phase 8 -- the customer SPA, React+Vite+TypeScript, exposed several gaps a backend-only test suite never could): (1) three customer-facing read endpoints from Appendix A were never actually built in Phases 1-7 (browse-by-API-call never needed them) -- added `GET /cities` (theatre; no human-readable city list existed anywhere), `GET /showtimes/{id}` (theatre, plain), and enriched `GET /movies/{movie_id}/showtimes?city=&date=` (theatre, one low-frequency live call to catalog per request, confirmed acceptable) and `GET /showtimes/{id}/seatmap` (booking, wrapped with movie/theatre/screen/time/price context cached in `SHOWTIME_META` at materialize time -- §4.3's table now also carries `theatre_name`/`screen_name`/`start_time`/`base_price`, not just `movie_title` -- specifically to keep this, the system's highest-volume read path §2, free of any live cross-service call). (2) Three infrastructure gaps a real browser caught that curl-based testing structurally couldn't: the routing service had no CORS headers, so the browser silently blocked every API response from a different-origin SPA (curl never enforces CORS, hence never catching this); the local CDN mock's `StaticFiles` mount had no SPA fallback, so any direct navigation to a client-side route (e.g. a reload mid-flow) 404'd instead of serving `index.html` for React Router to handle; and Vite's default build output directory (`assets/`) collided with the CDN mock's already-documented `GET /assets/{asset_id}` route, which matched bundle filenames as attempted `asset_id` UUIDs and 422'd on every JS/CSS request -- fixed by renaming Vite's output dir (`app-assets/`) rather than touching the established `/assets` contract. (3) Confirmed with user: the post-countdown grace window (§5.6/v14 -- confirm can still succeed after the displayed countdown reaches zero, until the sweep worker actually reclaims the seat) is surfaced explicitly in the UI rather than left as an unadvertised possibility, conditional on the no-double-booking guarantee holding regardless of timing -- which Phases 4 and 6 already prove under real concurrency, so the condition holds and the UI says so.
 
+v17 changes from v16 (Phase 9 -- the admin SPA, exposed a second, larger round of gaps the same way v16 did): (1) six admin-facing list/get endpoints were missing entirely -- not just unbuilt customer-facing ones this time, but the ability to *manage* anything that already exists: `GET /admin/movies` (catalog, includes inactive -- the customer `GET /movies` always filters to `is_active=TRUE` even with no city given, so it can't serve this), `GET /admin/movies/{id}/releases`, `GET /admin/theatres/{id}/screens`, `GET /admin/screens/{id}/seat-layouts`, `GET /admin/seat-layouts/{id}` (standalone, including current lock status -- previously only ever returned as a side effect of create/lock/publish/clone), and `GET /admin/screens/{id}/showtimes`. Confirmed with user: built all six, same reasoning as v16's gaps -- an admin UI structurally cannot manage what it cannot list. (2) A real constraint in §4.5's own contract, found while building the canvas editor: there is no endpoint to add seats to an *already-created* draft -- `PATCH .../seats/{id}` and the bulk variant only ever edit existing seats (relabel/reposition/retype/reprice/deactivate), and `POST .../draft` is the only path that ever inserts new `SEAT_TEMPLATE` rows. This is in fact consistent with §4.5's Builder framing taken literally ("each tool invocation... appending to one in-progress collection before a final build/save") rather than a bug needing a new endpoint: the canvas builds the complete flat seat list entirely client-side first (line/grid/curve/single tools, none of which touch the server), and only the first save persists it in one `POST` call. Editing an already-created draft is therefore select-and-edit-existing-seats only (no further additions) until publish. (3) Same v16-style infrastructure verification, this time for a second app under a *different* path prefix (`/admin/`, not `/`) and confirmed rather than assumed per user's explicit instruction: routing's CORS policy (`allow_origins=["*"]`, v16) and local-cdn-mock's `SPAStaticFiles` (already applied to both the `/` and `/admin` mounts, v16) both already covered admin-web with no further backend changes -- but building admin-web's own Vite config surfaced a need Vite's `base` option exists for precisely: without `base: '/admin/'`, built asset URLs in `index.html` are absolute from the domain root and 404 under a sub-path mount (customer-web, served at the root, never needed this). A related, easy-to-miss Playwright gotcha while *writing* that verification: `page.goto(url)` resolves via `new URL(url, baseURL)`, so a leading `/` in the path discards baseURL's own sub-path entirely (`new URL("/", "http://host/admin")` is `http://host/`, not `http://host/admin/`) -- caught a test that was silently exercising customer-web's bundle instead of admin-web's. Fix: baseURL needs a trailing slash, and test paths must never start with `/`.
+
 ---
 
 ## 1. Requirements recap
@@ -483,7 +485,7 @@ Create endpoints are idempotent via a server-derived key (§11.1), not a client-
 movie-booking-system/
 ├── apps/
 │   ├── customer-web/          (customer SPA -- React+Vite+TypeScript, v16; e2e/ holds the Playwright suite, run against the build deployed into local-cdn-mock/static/customer, never the Vite dev server)
-│   └── admin-web/               (admin SPA — includes the seat-layout canvas editor, §4.5, with draft-lock UX, §4.6)
+│   └── admin-web/               (admin SPA, v17 — includes the seat-layout canvas editor, §4.5, with draft-lock UX, §4.6; e2e/ Playwright suite run against the build deployed into local-cdn-mock/static/admin under the /admin/ prefix)
 ├── services/
 │   ├── catalog/                  (+ /admin/* routes)
 │   ├── theatre/                   (+ /admin/* routes, draft-lock enforcement)
@@ -508,9 +510,11 @@ All endpoints below require an `ADMIN` role claim when `AUTH_ENABLED=true`. Crea
 
 **Catalog service**
 ```
+GET    /admin/movies                              v17 — every movie, including inactive (unlike GET /movies)
 POST   /admin/movies
 PUT    /admin/movies/{movie_id}
 DELETE /admin/movies/{movie_id}                  soft-delete, non-cascading (§4.2)
+GET    /admin/movies/{movie_id}/releases          v17 — list a movie's releases
 POST   /admin/movies/{movie_id}/releases         create a MOVIE_RELEASE (city, dates)
 PUT    /admin/releases/{release_id}
 ```
@@ -519,10 +523,13 @@ PUT    /admin/releases/{release_id}
 ```
 POST   /admin/theatres
 PUT    /admin/theatres/{theatre_id}
+GET    /admin/theatres/{theatre_id}/screens                   v17 — list a theatre's screens
 POST   /admin/theatres/{theatre_id}/screens
 PUT    /admin/screens/{screen_id}
 
-POST   /admin/seat-layouts/draft                              { screen_id, name, seats: [{id, label, x, y, seat_type, price_multiplier}, ...] } (§4.5)
+GET    /admin/screens/{screen_id}/seat-layouts                v17 — list a screen's draft/published layouts
+GET    /admin/seat-layouts/{layout_id}                        v17 — standalone read incl. current lock status
+POST   /admin/seat-layouts/draft                              { screen_id, name, seats: [{id, label, x, y, seat_type, price_multiplier}, ...] } (§4.5) — the *only* way new SEAT_TEMPLATE rows are ever created (v17: confirmed there is no "add seats to an existing draft" endpoint, by design)
 POST   /admin/seat-layouts/draft/{draft_id}/lock               acquire or heartbeat-refresh the edit lock (§4.6) — 409 if held by another admin and not stale
 DELETE /admin/seat-layouts/draft/{draft_id}/lock               explicit release
 PATCH  /admin/seat-layouts/draft/{draft_id}/seats/{seat_id}    edit a single seat — requires holding the lock
@@ -530,6 +537,7 @@ PATCH  /admin/seat-layouts/draft/{draft_id}/seats              bulk-edit a multi
 POST   /admin/seat-layouts/draft/{draft_id}/publish            finalize, assign to screen, single transaction — requires holding the lock
 POST   /admin/seat-layouts/{layout_id}/clone                   { target_screen_id }
 
+GET    /admin/screens/{screen_id}/showtimes                      v17 — list a screen's showtimes (incl. inactive, unlike the customer-facing list)
 POST   /admin/showtimes                                          { movie_id, movie_title, screen_id, start_time, is_high_demand, base_price } (v12 adds movie_title) — always is_active=false, triggers §4.3 seat materialization, fails closed on exhausted retries
 PUT    /admin/showtimes/{showtime_id}
 POST   /admin/showtimes/{showtime_id}/activate                   flips is_active to true (v10)

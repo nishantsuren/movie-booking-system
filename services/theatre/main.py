@@ -394,6 +394,21 @@ def update_theatre(
     return dict(row)
 
 
+@app.get("/admin/theatres/{theatre_id}/screens")
+def list_screens_for_theatre(
+    theatre_id: UUID,
+    conn=Depends(get_db),
+    _ctx: AuthContext = Depends(require_role("ADMIN")),
+) -> list[dict]:
+    """Phase 9: there was no way to discover a theatre's existing screens
+    at all -- only the create-response ever returned one."""
+    _get_theatre_or_404(conn, theatre_id)
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM screen WHERE theatre_id = %s ORDER BY name", (str(theatre_id),))
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.post("/admin/theatres/{theatre_id}/screens", status_code=201)
 def create_screen(
     theatre_id: UUID,
@@ -454,6 +469,42 @@ def update_screen(
 # problem the design doc already flagged and deferred for BOOKING (§11.1).
 
 _SEAT_FIELD_TO_COLUMN = {"x": "position_x", "y": "position_y"}
+
+
+@app.get("/admin/screens/{screen_id}/seat-layouts")
+def list_seat_layouts_for_screen(
+    screen_id: UUID,
+    conn=Depends(get_db),
+    _ctx: AuthContext = Depends(require_role("ADMIN")),
+) -> list[dict]:
+    """Phase 9: finding an existing draft to resume editing, or the
+    published ACTIVE layout to clone, previously had no path besides
+    remembering the layout_id from whenever it was created."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM screen WHERE id = %s", (str(screen_id),))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="screen not found")
+        cur.execute(
+            "SELECT * FROM seat_layout WHERE screen_id = %s ORDER BY created_at DESC",
+            (str(screen_id),),
+        )
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+@app.get("/admin/seat-layouts/{layout_id}")
+def get_seat_layout(
+    layout_id: UUID,
+    conn=Depends(get_db),
+    _ctx: AuthContext = Depends(require_role("ADMIN")),
+) -> dict:
+    """Phase 9: standalone read, including current lock status -- needed
+    to resume an in-progress draft (e.g. after a page reload) and to show
+    "currently locked by X" before even attempting to acquire the lock,
+    not just as a side effect of create/lock/publish/clone responses."""
+    layout = _get_layout_or_404(conn, layout_id)
+    layout["seats"] = _list_seats(conn, layout_id)
+    return layout
 
 
 @app.post("/admin/seat-layouts/draft", status_code=201)
@@ -793,6 +844,26 @@ def _get_showtime_or_404(conn, showtime_id: UUID) -> dict:
     if row is None:
         raise HTTPException(status_code=404, detail="showtime not found")
     return dict(row)
+
+
+@app.get("/admin/screens/{screen_id}/showtimes")
+def list_showtimes_for_screen(
+    screen_id: UUID,
+    conn=Depends(get_db),
+    _ctx: AuthContext = Depends(require_role("ADMIN")),
+) -> list[dict]:
+    """Phase 9: admin showtime management (edit/activate/deactivate
+    existing ones) needs to list them first -- unlike the customer-facing
+    GET /movies/{id}/showtimes, this returns every showtime regardless of
+    is_active, since deactivated ones are exactly what an admin managing
+    them needs to see too."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT id FROM screen WHERE id = %s", (str(screen_id),))
+        if cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="screen not found")
+        cur.execute("SELECT * FROM showtime WHERE screen_id = %s ORDER BY start_time", (str(screen_id),))
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
 
 
 @app.post("/admin/showtimes", status_code=201)
