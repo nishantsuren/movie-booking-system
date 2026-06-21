@@ -13,25 +13,41 @@ conversation memory.
 
 ## Current state
 
-Phase 7 complete & verified: user service -- `app_user` table
-(`"user"` is a reserved Postgres keyword, hence the name) with `role`
-(CUSTOMER|ADMIN); `POST /auth/register` (bcrypt hash, email is the
-natural idempotency key but a duplicate is a 409, not a silent
-idempotent-replay -- password isn't part of the dedup key, so silently
-returning the first registrant's row would be a real bug, not a
-harmless retry); `POST /auth/login` issues a JWT via shared/auth/auth.py's
-existing JWT_SECRET/JWT_ALGORITHM (no second auth scheme); `GET
-/users/{id}`. `AUTH_ENABLED` stays `false` everywhere (Phase 10's job).
-`tests/integration/test_phase7.py` (7 tests) + full regression across
-all 7 phases (50 tests): 48 passed, 2 skipped (pre-existing self-skipping
-fail-closed tests from Phases 3/5, unrelated to this phase, already
-verified for real elsewhere) -- confirms nothing built so far
-accidentally started requiring a token. Carries forward: sweep worker
-(Phase 6, `services/booking/adapters/reconciliation_sweep.py`, v13/v14);
-`RedisSeatLocker`/hash-tagged keys (v11); `SHOWTIME.base_price` (v10);
-pre-existing Phase-2 gap (publish never deactivates prior ACTIVE
-layout); draft creation has no idempotency key; lock-gated endpoints
-use JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id`; catalog's
+Phase 8 complete & verified: customer SPA (`apps/customer-web/`,
+React+Vite+TypeScript, confirmed with user) -- browse/showtimes/seatmap/
+booking/mocked-payment/confirmation, calling only through the routing
+service, bundle built and deployed into `local-cdn-mock/static/customer/`
+(`npm run build:deploy`), never served from the Vite dev server for
+testing. `VITE_API_BASE_URL` env-configured (§3.2), never hardcoded.
+Backend gap filled first (frontend structurally needed it): `GET
+/cities`, `GET /showtimes/{id}` (theatre, plain), enriched `GET
+/movies/{id}/showtimes?city=&date=` (theatre, one live catalog call/request)
+and `GET /showtimes/{id}/seatmap` (booking, wrapped with movie/theatre/
+screen/time/price from `SHOWTIME_META`, extended at materialize time --
+v16, see design.md). Three real infra bugs a browser caught that curl
+couldn't: routing had no CORS headers (browser silently blocks
+cross-origin responses; curl never enforces CORS); local-cdn-mock's
+`StaticFiles` had no SPA fallback (client-side routes 404'd on direct
+nav); Vite's default `assets/` build dir collided with the existing
+`GET /assets/{asset_id}` route (422s parsing bundle filenames as UUIDs)
+-- fixed via `vite.config.ts`'s `assetsDir`, not the API contract.
+Countdown UX (confirmed w/ user, conditional on the no-double-booking
+guarantee already proven in Phases 4/6): communicates the post-v14
+grace window explicitly rather than asserting a hard deadline.
+Playwright E2E suite (`apps/customer-web/e2e/`, chosen over Cypress for
+native multi-context support, needed for the seat-conflict test): happy
+path, seat-conflict (two real browser contexts, found and fixed a test
+bug -- `waitForURL` trivially matches a URL the page is already on, use
+`waitForResponse` for race assertions instead), payment failure (route
+interception -- backend failure already proven for real in
+`test_phase5.py`, this tests the frontend's rendering), and both
+countdown-grace-window outcomes (one waits ~29s for the real live sweep
+worker). All 5 pass; full backend regression (50 tests) still 48
+passed/2 skipped, unaffected. Carries forward: sweep worker (Phase 6,
+v13/v14); `RedisSeatLocker`/hash-tagged keys (v11); `SHOWTIME.base_price`
+(v10); pre-existing Phase-2 gap (publish never deactivates prior ACTIVE
+layout); draft creation has no idempotency key; lock-gated endpoints use
+JWT `sub` when `AUTH_ENABLED=true` else `X-Admin-User-Id`; catalog's
 `?city=` uses theatre's `city_id` directly (no local `CITY` copy till
 Phase 13).
 
@@ -65,6 +81,15 @@ Phase 13).
   `start_service` calls, following the existing env-var pattern
   (`DATABASE_URL` built from `.env`'s Postgres settings, pointed at the
   service's own logical database).
+- **Frontend** (Phase 8+): React+Vite+TypeScript, in `apps/<name>/`. API
+  base URL via `import.meta.env.VITE_API_BASE_URL` (`.env`), never
+  hardcoded (§3.2). E2E: Playwright in `apps/<name>/e2e/`, run via
+  `npm run test:e2e` against the build deployed into
+  `local-cdn-mock/static/<name>/` (`npm run build:deploy`) — not the Vite
+  dev server, so tests exercise the actual serving path (and its real
+  gotchas: CORS on routing, SPA fallback on local-cdn-mock, the
+  `/assets` build-dir collision — see design.md v16 before re-deriving
+  any of these).
 
 ## Working process
 

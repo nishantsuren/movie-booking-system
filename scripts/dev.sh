@@ -70,7 +70,7 @@ start_service catalog services/catalog 8001 \
 
 start_service theatre services/theatre 8002 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/theatre_db" \
-  BOOKING_SERVICE_URL="http://localhost:8003"
+  BOOKING_SERVICE_URL="http://localhost:8003" CATALOG_SERVICE_URL="http://localhost:8001"
 
 start_service booking services/booking 8003 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/booking_db" \

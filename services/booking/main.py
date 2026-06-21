@@ -6,6 +6,8 @@ seats, mocked payment, confirm, cancel (§5.6, §7/§8, Phase 5).
 """
 import hashlib
 import os
+from datetime import datetime
+from typing import Optional
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -99,6 +101,14 @@ class MaterializeSeat(BaseModel):
 class MaterializeRequest(BaseModel):
     movie_title: str
     seats: list[MaterializeSeat]
+    # Phase 8: theatre/screen/time/price context for the seatmap page,
+    # cached here rather than fetched live (see showtime_meta_repository.py).
+    # Optional with defaults so a payload from before this phase (e.g. a
+    # direct test call) still validates.
+    theatre_name: str = ""
+    screen_name: str = ""
+    start_time: Optional[datetime] = None
+    base_price: Optional[float] = None
 
 
 @app.post("/internal/showtimes/{showtime_id}/materialize-seats", status_code=201)
@@ -132,9 +142,17 @@ def materialize_seats(
                 ),
             )
 
-    # §4.3/§11.1 v12: cache movie_title locally so BOOKING creation never
-    # needs a live cross-service call on the booking hot path.
-    ShowtimeMetaRepository(conn).upsert(str(showtime_id), body.movie_title)
+    # §4.3/§11.1 v12, extended Phase 8: cache showtime display context
+    # locally so neither booking creation nor the seatmap read ever needs
+    # a live cross-service call on the booking hot path.
+    ShowtimeMetaRepository(conn).upsert(
+        str(showtime_id),
+        body.movie_title,
+        theatre_name=body.theatre_name,
+        screen_name=body.screen_name,
+        start_time=body.start_time,
+        base_price=body.base_price,
+    )
     conn.commit()
 
     with conn.cursor() as cur:
@@ -144,6 +162,36 @@ def materialize_seats(
         )
         rows = [dict(r) for r in cur.fetchall()]
     return {"showtime_id": str(showtime_id), "seats": rows}
+
+
+@app.get("/showtimes/{showtime_id}/seatmap")
+def get_seatmap(showtime_id: UUID, conn=Depends(get_db)) -> dict:
+    """Appendix A, enriched (Phase 8, design v16): wraps the seat array
+    with the showtime-level display context the seatmap page needs
+    (movie/theatre/screen/time/price), all served from the local
+    showtime_meta cache -- no live cross-service call on this, the
+    system's highest-volume read path (§2)."""
+    meta = ShowtimeMetaRepository(conn).get(str(showtime_id))
+    if meta is None:
+        raise HTTPException(status_code=404, detail="showtime not found or not materialized")
+
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT id, label, position_x AS x, position_y AS y, seat_type, price, status "
+            "FROM showtime_seat WHERE showtime_id = %s ORDER BY label",
+            (str(showtime_id),),
+        )
+        seats = [dict(r) for r in cur.fetchall()]
+
+    return {
+        "showtime_id": str(showtime_id),
+        "movie_title": meta["movie_title"],
+        "theatre_name": meta["theatre_name"],
+        "screen_name": meta["screen_name"],
+        "start_time": meta["start_time"].isoformat() if meta["start_time"] else None,
+        "base_price": meta["base_price"],
+        "seats": seats,
+    }
 
 
 # --- booking saga (Appendix A, §5.6, §7/§8) ---

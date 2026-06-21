@@ -24,6 +24,7 @@ from shared.idempotency.idempotency import IdempotentWriter
 
 AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
 BOOKING_SERVICE_URL = os.getenv("BOOKING_SERVICE_URL", "http://localhost:8003")
+CATALOG_SERVICE_URL = os.getenv("CATALOG_SERVICE_URL", "http://localhost:8001")
 
 # Draft-lock staleness threshold (design §4.6): "~2 minutes, generous
 # against network blips" -- a single source of truth shared by every
@@ -46,12 +47,28 @@ class MaterializationFailed(RuntimeError):
     fail-closed: no orphan showtime with zero bookable seats)."""
 
 
-def _materialize_seats_with_retry(showtime_id: UUID, movie_title: str, seats_payload: list[dict]) -> dict:
+def _materialize_seats_with_retry(
+    showtime_id: UUID,
+    movie_title: str,
+    seats_payload: list[dict],
+    theatre_name: str = "",
+    screen_name: str = "",
+    start_time: Optional[datetime] = None,
+    base_price: Optional[float] = None,
+) -> dict:
     url = f"{BOOKING_SERVICE_URL}/internal/showtimes/{showtime_id}/materialize-seats"
+    payload = {
+        "movie_title": movie_title,
+        "seats": seats_payload,
+        "theatre_name": theatre_name,
+        "screen_name": screen_name,
+        "start_time": start_time.isoformat() if start_time else None,
+        "base_price": base_price,
+    }
     last_error: Optional[str] = None
     for attempt in range(MATERIALIZE_MAX_ATTEMPTS):
         try:
-            resp = httpx.post(url, json={"movie_title": movie_title, "seats": seats_payload}, timeout=5.0)
+            resp = httpx.post(url, json=payload, timeout=5.0)
         except httpx.TransportError as exc:
             last_error = f"transport error calling booking service: {exc}"
         else:
@@ -234,6 +251,18 @@ def _raise_lock_error(conn, draft_id: UUID, admin_id: UUID) -> None:
 
 # --- customer endpoints (Appendix A) ---
 
+@app.get("/cities")
+def list_cities(conn=Depends(get_db)) -> list[dict]:
+    """Not in Appendix A's original contract -- added Phase 8: the
+    customer SPA needs a human-readable city picker, and CITY is
+    theatre-owned (§4.1) with no existing read endpoint at all (`GET
+    /theatres?city=` takes a city_id but never exposes one to pick from)."""
+    with conn.cursor() as cur:
+        cur.execute("SELECT * FROM city ORDER BY name")
+        rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
 @app.get("/theatres")
 def list_theatres(city: Optional[UUID] = None, conn=Depends(get_db)) -> list[dict]:
     if city is not None:
@@ -251,6 +280,67 @@ def list_theatres(city: Optional[UUID] = None, conn=Depends(get_db)) -> list[dic
 @app.get("/theatres/{theatre_id}")
 def get_theatre(theatre_id: UUID, conn=Depends(get_db)) -> dict:
     return _get_theatre_or_404(conn, theatre_id)
+
+
+@app.get("/showtimes/{showtime_id}")
+def get_showtime(showtime_id: UUID, conn=Depends(get_db)) -> dict:
+    """Plain, theatre-only (no cross-service enrichment) -- low-traffic
+    standalone lookup, e.g. a refresh/sanity check before seat selection.
+    The richer, cached showtime context lives on booking's seatmap
+    response (Phase 8, design v16) for the actual high-volume read path."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT st.*, s.name AS screen_name, t.name AS theatre_name, t.id AS theatre_id "
+            "FROM showtime st JOIN screen s ON s.id = st.screen_id JOIN theatre t ON t.id = s.theatre_id "
+            "WHERE st.id = %s",
+            (str(showtime_id),),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="showtime not found")
+    return dict(row)
+
+
+@app.get("/movies/{movie_id}/showtimes")
+def list_showtimes_for_movie(
+    movie_id: UUID,
+    city: Optional[UUID] = None,
+    date: Optional[str] = None,
+    conn=Depends(get_db),
+) -> dict:
+    """Appendix A, enriched (Phase 8, design v16): one response carrying
+    both the movie's own details (via a single, low-frequency
+    cross-service call to catalog -- this is picked once per date/city
+    choice, not once per click, unlike the seatmap read) and the matching
+    showtime list, so the frontend doesn't have to orchestrate two calls
+    itself for this page."""
+    sql = (
+        "SELECT st.*, s.name AS screen_name, t.name AS theatre_name "
+        "FROM showtime st JOIN screen s ON s.id = st.screen_id JOIN theatre t ON t.id = s.theatre_id "
+        "WHERE st.movie_id = %(movie_id)s AND st.is_active = true"
+    )
+    params: dict = {"movie_id": str(movie_id)}
+    if city is not None:
+        sql += " AND t.city_id = %(city)s"
+        params["city"] = str(city)
+    if date is not None:
+        sql += " AND st.start_time::date = %(date)s"
+        params["date"] = date
+    sql += " ORDER BY st.start_time"
+
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        showtimes = [dict(r) for r in cur.fetchall()]
+
+    try:
+        resp = httpx.get(f"{CATALOG_SERVICE_URL}/movies/{movie_id}", timeout=5.0)
+    except httpx.TransportError as exc:
+        raise HTTPException(status_code=503, detail=f"catalog service unavailable: {exc}")
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="movie not found")
+    resp.raise_for_status()
+
+    return {"movie": resp.json(), "showtimes": showtimes}
 
 
 # --- admin endpoints (Appendix C) ---
@@ -712,8 +802,13 @@ def create_showtime(
     _ctx: AuthContext = Depends(require_role("ADMIN")),
 ) -> dict:
     with conn.cursor() as cur:
-        cur.execute("SELECT id FROM screen WHERE id = %s", (str(body.screen_id),))
-        if cur.fetchone() is None:
+        cur.execute(
+            "SELECT s.name AS screen_name, t.name AS theatre_name "
+            "FROM screen s JOIN theatre t ON t.id = s.theatre_id WHERE s.id = %s",
+            (str(body.screen_id),),
+        )
+        screen_row = cur.fetchone()
+        if screen_row is None:
             raise HTTPException(status_code=404, detail="screen not found")
 
     with conn.cursor() as cur:
@@ -784,7 +879,15 @@ def create_showtime(
     ]
 
     try:
-        _materialize_seats_with_retry(showtime["id"], body.movie_title, seats_payload)
+        _materialize_seats_with_retry(
+            showtime["id"],
+            body.movie_title,
+            seats_payload,
+            theatre_name=screen_row["theatre_name"],
+            screen_name=screen_row["screen_name"],
+            start_time=body.start_time,
+            base_price=body.base_price,
+        )
     except MaterializationFailed as exc:
         conn.rollback()
         raise HTTPException(

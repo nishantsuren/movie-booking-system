@@ -24,6 +24,8 @@ v14 changes from v13 (Phase 6 build-time correction, found by trying to write §
 
 v15 changes from v14 (Phase 7): `USER` is implemented as a table literally named `app_user`, not `user` -- `user` is a reserved word in Postgres (`CREATE TABLE user` is a syntax error outright), so every other service's "table name matches the entity name" convention has one deliberate, technically-forced exception. `POST /auth/register` also deliberately does not follow §11.1's general "a conflict on the derived/natural key returns the existing row" pattern: email is `USER`'s natural identity-defining field (like `PAYMENT.booking_id`), but password is not part of that key, so a request that conflicts on email can't be distinguished from a different person targeting an already-taken email versus a genuine retry. Returning the first registrant's row on conflict would be a real account-confusion bug, not a harmless idempotent replay -- so a conflict here is a `409`, not a `200`/`201` with the existing row.
 
+v16 changes from v15 (Phase 8 -- the customer SPA, React+Vite+TypeScript, exposed several gaps a backend-only test suite never could): (1) three customer-facing read endpoints from Appendix A were never actually built in Phases 1-7 (browse-by-API-call never needed them) -- added `GET /cities` (theatre; no human-readable city list existed anywhere), `GET /showtimes/{id}` (theatre, plain), and enriched `GET /movies/{movie_id}/showtimes?city=&date=` (theatre, one low-frequency live call to catalog per request, confirmed acceptable) and `GET /showtimes/{id}/seatmap` (booking, wrapped with movie/theatre/screen/time/price context cached in `SHOWTIME_META` at materialize time -- §4.3's table now also carries `theatre_name`/`screen_name`/`start_time`/`base_price`, not just `movie_title` -- specifically to keep this, the system's highest-volume read path §2, free of any live cross-service call). (2) Three infrastructure gaps a real browser caught that curl-based testing structurally couldn't: the routing service had no CORS headers, so the browser silently blocked every API response from a different-origin SPA (curl never enforces CORS, hence never catching this); the local CDN mock's `StaticFiles` mount had no SPA fallback, so any direct navigation to a client-side route (e.g. a reload mid-flow) 404'd instead of serving `index.html` for React Router to handle; and Vite's default build output directory (`assets/`) collided with the CDN mock's already-documented `GET /assets/{asset_id}` route, which matched bundle filenames as attempted `asset_id` UUIDs and 422'd on every JS/CSS request -- fixed by renaming Vite's output dir (`app-assets/`) rather than touching the established `/assets` contract. (3) Confirmed with user: the post-countdown grace window (§5.6/v14 -- confirm can still succeed after the displayed countdown reaches zero, until the sweep worker actually reclaims the seat) is surfaced explicitly in the UI rather than left as an unadvertised possibility, conditional on the no-double-booking guarantee holding regardless of timing -- which Phases 4 and 6 already prove under real concurrency, so the condition holds and the UI says so.
+
 ---
 
 ## 1. Requirements recap
@@ -438,14 +440,16 @@ GET  /movies/{movie_id}
 
 **Theatre service**
 ```
-GET  /movies/{movie_id}/showtimes?city=&date=
+GET  /cities                                       v16 -- human-readable city picker, CITY had no read endpoint at all before this
+GET  /theatres?city=                               Appendix A gap filled in Phase 1, see §4.1's note
 GET  /theatres/{theatre_id}
-GET  /showtimes/{showtime_id}
+GET  /movies/{movie_id}/showtimes?city=&date=      → { movie: {...}, showtimes: [...] } (v16 -- one low-frequency catalog call per request, not per seatmap view)
+GET  /showtimes/{showtime_id}                      plain, theatre-only fields (v16)
 ```
 
 **Booking service**
 ```
-GET    /showtimes/{showtime_id}/seatmap            → [{ id, label, x, y, seat_type, price, status }, ...]
+GET    /showtimes/{showtime_id}/seatmap            → { showtime_id, movie_title, theatre_name, screen_name, start_time, base_price, seats: [{ id, label, x, y, seat_type, price, status }, ...] } (v16 -- wrapped with cached context, not the bare array originally specified here)
 POST   /bookings                                    { showtime_id, seat_ids, user_id } → 201 PENDING | 409 conflict (§5.6)
 GET    /bookings/{booking_id}
 DELETE /bookings/{booking_id}                       explicit cancel, PENDING only (§5.6)
@@ -478,7 +482,7 @@ Create endpoints are idempotent via a server-derived key (§11.1), not a client-
 ```
 movie-booking-system/
 ├── apps/
-│   ├── customer-web/          (customer SPA)
+│   ├── customer-web/          (customer SPA -- React+Vite+TypeScript, v16; e2e/ holds the Playwright suite, run against the build deployed into local-cdn-mock/static/customer, never the Vite dev server)
 │   └── admin-web/               (admin SPA — includes the seat-layout canvas editor, §4.5, with draft-lock UX, §4.6)
 ├── services/
 │   ├── catalog/                  (+ /admin/* routes)

@@ -16,6 +16,8 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import Scope
 
 from db import get_db
 from shared.idempotency.idempotency import IdempotentWriter
@@ -92,9 +94,28 @@ def get_asset(asset_id: UUID, conn=Depends(get_db)) -> FileResponse:
 # Registered last: Starlette matches routes in registration order, and a
 # root-mounted StaticFiles app would otherwise shadow every route above.
 
+
+class SPAStaticFiles(StaticFiles):
+    """Plain StaticFiles 404s on any path that isn't a real file (e.g.
+    /movies/abc/showtimes, a client-side react-router route) -- there is
+    no server-side route for it, only the SPA's own JS knows what to do
+    with it. Falls back to index.html (status 200, not a 404.html) for
+    any unmatched path, the standard SPA-hosting pattern (Phase 8 found
+    this the hard way: a direct navigation/page reload on any non-root
+    customer-web route 404'd until this existed)."""
+
+    async def get_response(self, path: str, scope: Scope):
+        try:
+            return await super().get_response(path, scope)
+        except StarletteHTTPException as exc:
+            if exc.status_code == 404:
+                return await super().get_response("index.html", scope)
+            raise
+
+
 for spa_name in ("customer", "admin"):
     spa_dir = BASE_DIR / "static" / spa_name
     spa_dir.mkdir(parents=True, exist_ok=True)
 
-app.mount("/admin", StaticFiles(directory=BASE_DIR / "static" / "admin", html=True), name="admin-spa")
-app.mount("/", StaticFiles(directory=BASE_DIR / "static" / "customer", html=True), name="customer-spa")
+app.mount("/admin", SPAStaticFiles(directory=BASE_DIR / "static" / "admin", html=True), name="admin-spa")
+app.mount("/", SPAStaticFiles(directory=BASE_DIR / "static" / "customer", html=True), name="customer-spa")

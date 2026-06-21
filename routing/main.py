@@ -9,6 +9,7 @@ import os
 
 import httpx
 from fastapi import FastAPI, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 
 SERVICE_MAP = {
     "catalog": os.getenv("CATALOG_SERVICE_URL", "http://catalog:8000"),
@@ -21,6 +22,22 @@ AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
 
 app = FastAPI(title="Routing service")
 client = httpx.AsyncClient(timeout=10.0)
+
+# Phase 8: the customer SPA (served from the local CDN mock, a different
+# origin/port than this service) calls through here for every backend
+# request (§3) -- without CORS headers the browser blocks the response
+# outright, even though curl/server-to-server calls never hit this at
+# all (CORS is a browser-only restriction). Wide open is fine for now:
+# no auth exists yet (AUTH_ENABLED=false everywhere, Phase 10), nothing
+# here relies on cookies/credentials, and a real API gateway replaces
+# this entire service's slot in production (§3.2, §15) with its own
+# CORS policy.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health")
