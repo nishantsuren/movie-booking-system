@@ -6,6 +6,7 @@ in this codebase treats its database as the actual state machine.
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from typing import Optional
 
 
 class BookingStatus(str, Enum):
@@ -26,6 +27,7 @@ class Booking:
     price_paid: float
     status: BookingStatus
     expires_at: datetime
+    theatre_hold_id: Optional[str] = None  # v18/§5.7 -- NULL for pre-existing bookings (no backfill)
 
     @classmethod
     def from_row(cls, row: dict) -> "Booking":
@@ -39,6 +41,7 @@ class Booking:
             price_paid=row["price_paid"],
             status=BookingStatus(row["status"]),
             expires_at=row["expires_at"],
+            theatre_hold_id=row.get("theatre_hold_id"),
         )
 
 

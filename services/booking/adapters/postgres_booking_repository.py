@@ -37,6 +37,7 @@ class PostgresBookingRepository:
         seat_labels: str,
         price_paid: float,
         expires_at,
+        theatre_hold_id: Optional[str] = None,
     ) -> Optional[Booking]:
         """INSERT ... ON CONFLICT against the partial unique index --
         requires an explicit WHERE clause matching the index predicate
@@ -48,8 +49,8 @@ class PostgresBookingRepository:
         with self._conn.cursor() as cur:
             cur.execute(
                 """
-                INSERT INTO booking (idempotency_key, user_id, showtime_id, movie_title, seat_labels, price_paid, expires_at)
-                VALUES (%(idempotency_key)s, %(user_id)s, %(showtime_id)s, %(movie_title)s, %(seat_labels)s, %(price_paid)s, %(expires_at)s)
+                INSERT INTO booking (idempotency_key, user_id, showtime_id, movie_title, seat_labels, price_paid, expires_at, theatre_hold_id)
+                VALUES (%(idempotency_key)s, %(user_id)s, %(showtime_id)s, %(movie_title)s, %(seat_labels)s, %(price_paid)s, %(expires_at)s, %(theatre_hold_id)s)
                 ON CONFLICT (idempotency_key) WHERE status IN ('PENDING', 'CONFIRMED') DO NOTHING
                 RETURNING *
                 """,
@@ -61,6 +62,7 @@ class PostgresBookingRepository:
                     "seat_labels": seat_labels,
                     "price_paid": price_paid,
                     "expires_at": expires_at,
+                    "theatre_hold_id": theatre_hold_id,
                 },
             )
             row = cur.fetchone()

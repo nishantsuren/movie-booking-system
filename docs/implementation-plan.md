@@ -174,6 +174,18 @@ Complexity is relative sizing (S/M/L), not a time estimate — actual duration d
 
 ---
 
+## Phase 9.5 — TheatreIntegration: the aggregator lock
+
+**Scope**: added after Phase 9 on an architectural correction (design v18, §5.7) — a real aggregator doesn't own the seat inventory, the theatre's own ticketing system does, and the same seat is simultaneously bookable via the theatre's own site, other aggregators, and box-office terminals. The `TheatreIntegration` interface, a `MockTheatreIntegration` (always succeeds locally), and the second leg of the two-phase lock wired into `BookingOrchestrator.select_seats`/`confirm`/`cancel`, plus the sweep worker's expiry path. Bounded: interface, mock, wiring, and failure tests only — real per-POS-system adapters are future work (§16.8).
+
+**Verification**:
+- Full existing regression suite, zero changes needed to any pre-existing test.
+- New failure-path tests: hold conflict (409, Redis lock released); theatre API timeout (503, Redis lock released, circuit breaker trips); confirm_hold failure after a successful hold+payment (Outbox retries independently, booking stays CONFIRMED); release_hold failure on both cancel and sweep expiry (Outbox retries, booking/seat state stays correctly CANCELLED/EXPIRED); a null `theatre_hold_id` (pre-v18 booking) skips the external call cleanly on both confirm and cancel.
+
+**Exit criteria**: the existing within-platform booking flow behaves identically to before this phase from the customer's perspective when the theatre integration succeeds (the common case); when it doesn't, the failure is surfaced cleanly (409/503) and never leaves Redis or Postgres in an inconsistent state.
+
+---
+
 ## Phase 10 — Auth hardening
 
 **Scope**: flip `AUTH_ENABLED=true` across every backend service; build out the full role-based access-control test matrix (§3.2, §15).

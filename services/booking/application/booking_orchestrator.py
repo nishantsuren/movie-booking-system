@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from adapters.payment_client import PaymentClient
 from adapters.postgres_booking_repository import PostgresBookingRepository
+from adapters.postgres_outbox_repository import PostgresOutboxRepository
 from adapters.postgres_seat_repository import PostgresSeatRepository
 from adapters.redis_seat_locker import RedisSeatLocker
 from adapters.showtime_meta_repository import ShowtimeMetaRepository
@@ -29,6 +30,7 @@ from domain.booking import (
     SeatsUnavailable,
     ShowtimeNotMaterialized,
 )
+from domain.theatre_integration import TheatreIntegration, TheatreIntegrationUnavailable
 
 BOOKING_HOLD_SECONDS = 600  # matches RedisSeatLocker's default lock TTL (§5.1/§5.4)
 
@@ -45,14 +47,18 @@ class BookingOrchestrator:
         self,
         seats: PostgresSeatRepository,
         locker: RedisSeatLocker,
+        theatre: TheatreIntegration,
         bookings: PostgresBookingRepository,
+        outbox: PostgresOutboxRepository,
         showtime_meta: ShowtimeMetaRepository,
         payments: PaymentClient,
         events,
     ):
         self._seats = seats
         self._locker = locker
+        self._theatre = theatre
         self._bookings = bookings
+        self._outbox = outbox
         self._showtime_meta = showtime_meta
         self._payments = payments
         self._events = events
@@ -86,18 +92,48 @@ class BookingOrchestrator:
         if not lock_result.success:
             raise SeatsUnavailable(lock_result.conflicting_seat_ids)
 
+        # Step 2 (§5.7, the saga's second leg): the external lock against
+        # the theatre's own ticketing system -- protects against every
+        # other booking channel (the theatre's own site, other
+        # aggregators, box office), which the Redis lock above (within-
+        # platform only) cannot. A theatre-side conflict or an
+        # unavailable theatre API both compensate step 1 by releasing
+        # the Redis lock we just took, exactly like a failed step 1
+        # itself would have meant never reaching here.
+        try:
+            hold_result = self._theatre.hold_seats(showtime_id, seat_ids, hold_duration_seconds=BOOKING_HOLD_SECONDS)
+        except TheatreIntegrationUnavailable:
+            self._locker.release(showtime_id, seat_ids)
+            raise
+        if not hold_result.success:
+            self._locker.release(showtime_id, seat_ids)
+            raise SeatsUnavailable(hold_result.conflicting_seat_ids)
+
         seat_labels = ",".join(sorted(found[sid]["label"] for sid in seat_ids))
         price_paid = sum(found[sid]["price"] for sid in seat_ids)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=BOOKING_HOLD_SECONDS)
 
         booking = self._bookings.create_pending(
-            idempotency_key, user_id, showtime_id, movie_title, seat_labels, price_paid, expires_at
+            idempotency_key,
+            user_id,
+            showtime_id,
+            movie_title,
+            seat_labels,
+            price_paid,
+            expires_at,
+            theatre_hold_id=hold_result.theatre_hold_id,
         )
         if booking is None:
             # Lost a true race: a concurrent identical request won the
-            # INSERT between our idempotency check above and now. We don't
-            # need the lock we just took -- the winner has its own.
+            # INSERT between our idempotency check above and now. We
+            # don't need the Redis lock or the external hold we just
+            # took -- the winner has its own of each. (No booking row
+            # exists yet to anchor an Outbox entry to, and this is a
+            # narrow race outside §13's named failure modes, so the
+            # release call is best-effort and direct here, same as the
+            # Redis release immediately above it.)
             self._locker.release(showtime_id, seat_ids)
+            self._theatre.release_hold(hold_result.theatre_hold_id)
             return self._bookings.get_live_by_idempotency_key(idempotency_key)
 
         locked_count = self._seats.lock_seats(showtime_id, seat_ids, booking.id, expires_at)
@@ -106,6 +142,7 @@ class BookingOrchestrator:
             # shouldn't happen if both layers are consistent, but fail
             # closed rather than persist a half-correct booking.
             self._locker.release(showtime_id, seat_ids)
+            self._theatre.release_hold(hold_result.theatre_hold_id)
             raise SeatsUnavailable(seat_ids)
 
         return booking
@@ -151,6 +188,17 @@ class BookingOrchestrator:
             confirmed = self._bookings.get(booking_id)
 
         self._locker.release(booking.showtime_id, booked_seat_ids)
+
+        # §5.7: confirm_hold is written to the Outbox in the *same*
+        # transaction as the booking confirm above -- a separate relay
+        # (adapters/theatre_outbox_relay.py) calls the theatre API and
+        # retries independently, so this hot path never blocks on
+        # theatre API latency. Skipped cleanly when there's no external
+        # hold to confirm: pre-v18 bookings (§13, no backfill) and any
+        # booking whose hold_seats call never actually succeeded.
+        if booking.theatre_hold_id is not None:
+            self._outbox.enqueue("CONFIRM_HOLD", booking_id, booking.theatre_hold_id)
+
         self._events.publish(BookingConfirmedEvent(booking_id=booking_id))
         return confirmed
 
@@ -169,4 +217,11 @@ class BookingOrchestrator:
 
         released_seat_ids = self._seats.release_to_available(booking.showtime_id, booking_id)
         self._locker.release(booking.showtime_id, released_seat_ids)
+
+        # §5.7/§13: same Outbox pattern as confirm() -- release_hold is
+        # retried independently by the relay, skipped cleanly when there
+        # was no external hold to release.
+        if booking.theatre_hold_id is not None:
+            self._outbox.enqueue("RELEASE_HOLD", booking_id, booking.theatre_hold_id)
+
         return cancelled

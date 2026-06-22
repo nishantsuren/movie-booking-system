@@ -8,8 +8,13 @@ instance's connection drops.
 Deliberately a standalone process, not wired into the FastAPI app --
 this has its own scaling/redundancy profile (N replicas, exactly one
 active) independent of request-handling capacity (Appendix B: lives in
-adapters/, not api/). Run directly: `python adapters/reconciliation_sweep.py`
+adapters/, not api/). Run directly: `python -m adapters.reconciliation_sweep`
 from services/booking, with DATABASE_URL set.
+
+v18/§5.7: also enqueues a RELEASE_HOLD Outbox entry (same table/relay
+BookingOrchestrator.cancel() uses) for each expired booking that had an
+external theatre hold -- in the same transaction as the expiry itself,
+skipped cleanly for NULL theatre_hold_id (pre-v18 bookings, §13).
 """
 import logging
 import os
@@ -146,10 +151,11 @@ class ReconciliationSweepWorker:
             with conn.cursor() as cur:
                 cur.execute(
                     "UPDATE booking SET status = 'EXPIRED', updated_at = now() "
-                    "WHERE id::text = ANY(%s) AND status = 'PENDING' RETURNING id",
+                    "WHERE id::text = ANY(%s) AND status = 'PENDING' RETURNING id, theatre_hold_id",
                     (candidate_ids,),
                 )
-                expired_ids = [str(row[0]) for row in cur.fetchall()]
+                expired_rows = [(str(row[0]), row[1]) for row in cur.fetchall()]
+                expired_ids = [row[0] for row in expired_rows]
 
             if self._after_booking_update_hook is not None:
                 self._after_booking_update_hook()
@@ -162,6 +168,21 @@ class ReconciliationSweepWorker:
                         "WHERE locked_by_booking_id::text = ANY(%s) AND status = 'LOCKED'",
                         (expired_ids,),
                     )
+
+                # §5.7/§13: release_hold for each expired booking that had
+                # an external hold, via the same Outbox the confirm/cancel
+                # paths use -- a separate relay retries it independently,
+                # in the *same transaction* as the expiry itself, same as
+                # BookingOrchestrator.cancel(). Skipped for NULL
+                # theatre_hold_id (pre-v18 bookings, §13).
+                with conn.cursor() as cur:
+                    for booking_id, theatre_hold_id in expired_rows:
+                        if theatre_hold_id is not None:
+                            cur.execute(
+                                "INSERT INTO pending_theatre_call (call_type, booking_id, theatre_hold_id) "
+                                "VALUES ('RELEASE_HOLD', %s, %s)",
+                                (booking_id, theatre_hold_id),
+                            )
 
             conn.commit()
             if expired_ids:

@@ -1,8 +1,9 @@
-"""Booking service — Phase 3-5.
+"""Booking service — Phase 3-5, 9.5.
 
 SHOWTIME_SEAT + internal materialize endpoint (§4.3, §5.3, Phase 3);
 RedisSeatLocker (§5.1/§5.2, Phase 4); BOOKING + the full saga -- select
-seats, mocked payment, confirm, cancel (§5.6, §7/§8, Phase 5).
+seats, mocked payment, confirm, cancel (§5.6, §7/§8, Phase 5);
+TheatreIntegration -- the external/aggregator lock (§5.7, Phase 9.5).
 """
 import hashlib
 import os
@@ -13,8 +14,10 @@ from uuid import UUID
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from adapters.mock_theatre_integration import MockTheatreIntegration
 from adapters.payment_client import PaymentClient, PaymentNotFound, PaymentServiceUnavailable
 from adapters.postgres_booking_repository import PostgresBookingRepository
+from adapters.postgres_outbox_repository import PostgresOutboxRepository
 from adapters.postgres_seat_repository import PostgresSeatRepository
 from adapters.redis_seat_locker import RedisSeatLocker
 from adapters.showtime_meta_repository import ShowtimeMetaRepository
@@ -29,6 +32,7 @@ from domain.booking import (
     SeatsUnavailable,
     ShowtimeNotMaterialized,
 )
+from domain.theatre_integration import TheatreIntegrationUnavailable
 from shared.auth.auth import AuthContext, get_auth_context
 from shared.events.events import LoggingEventPublisher
 
@@ -39,6 +43,13 @@ app = FastAPI(title="Booking service")
 _event_publisher = LoggingEventPublisher()
 _payment_client = PaymentClient()
 _seat_locker = RedisSeatLocker()
+# §5.7/Phase 9.5: hold_mode defaults to "success" -- normal operation and
+# every pre-existing test never touch this env var. It exists so the
+# live, HTTP-wired process can be restarted into "conflict"/"timeout"
+# for the new failure-path tests (a)/(b), the same way earlier phases
+# stopped/restarted a real service process to simulate a downstream
+# outage -- there's no real theatre API here to actually fail on demand.
+_theatre_integration = MockTheatreIntegration(hold_mode=os.getenv("THEATRE_MOCK_HOLD_MODE", "success"))
 
 
 @app.get("/health")
@@ -66,7 +77,9 @@ def _build_orchestrator(conn) -> BookingOrchestrator:
     return BookingOrchestrator(
         seats=PostgresSeatRepository(conn),
         locker=_seat_locker,
+        theatre=_theatre_integration,
         bookings=PostgresBookingRepository(conn),
+        outbox=PostgresOutboxRepository(conn),
         showtime_meta=ShowtimeMetaRepository(conn),
         payments=_payment_client,
         events=_event_publisher,
@@ -230,6 +243,9 @@ def create_booking(
             status_code=409,
             detail={"detail": "seats unavailable", "conflicting_seat_ids": exc.conflicting_seat_ids},
         )
+    except TheatreIntegrationUnavailable as exc:
+        conn.rollback()
+        raise HTTPException(status_code=503, detail=f"theatre integration unavailable: {exc}")
 
     conn.commit()
     return _booking_to_dict(booking)

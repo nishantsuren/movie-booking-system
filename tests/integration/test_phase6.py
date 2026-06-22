@@ -51,7 +51,13 @@ BOOKING_DB_URL = os.environ.get(
 
 
 def _find_sweep_pids() -> list[int]:
-    out = subprocess.run(["pgrep", "-f", "adapters/reconciliation_sweep.py"], capture_output=True, text=True)
+    # dev.sh runs workers via `python -m adapters.reconciliation_sweep`
+    # (scripts/dev.sh's start_worker, Phase 9.5) rather than a file path
+    # -- `python -m pkg.module` resolves cross-module imports (adapters.X,
+    # domain.X) the new theatre-integration workers need, which `python
+    # path/to/file.py` does not (it sets sys.path[0] to the file's own
+    # directory, not cwd). Match the dotted form pgrep actually sees.
+    out = subprocess.run(["pgrep", "-f", "adapters.reconciliation_sweep"], capture_output=True, text=True)
     return [int(p) for p in out.stdout.split() if p.strip()]
 
 
@@ -73,7 +79,7 @@ def stop_external_sweep_workers():
         log_path = os.path.join(REPO_ROOT, "logs", "reconciliation-sweep-restarted.log")
         for _ in pids:
             subprocess.Popen(
-                [sys.executable, "adapters/reconciliation_sweep.py"],
+                [sys.executable, "-m", "adapters.reconciliation_sweep"],
                 cwd=BOOKING_DIR,
                 env=env,
                 stdout=open(log_path, "a"),

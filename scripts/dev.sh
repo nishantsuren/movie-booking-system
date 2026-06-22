@@ -46,10 +46,19 @@ start_service () {
 }
 
 start_worker () {
+  # $module is a dotted module path (e.g. adapters.reconciliation_sweep),
+  # run via `python -m` rather than a file path -- `python path/to/x.py`
+  # sets sys.path[0] to that file's own directory, breaking any worker
+  # that imports sibling modules from the same package (adapters.X,
+  # domain.X); `python -m pkg.module` sets sys.path[0] to cwd instead,
+  # which resolves correctly (found while wiring up the Phase 9.5
+  # outbox relay and availability sync workers, the first workers here
+  # with cross-module imports of their own -- reconciliation_sweep.py
+  # never needed this since it has none).
   local name="$1" dir="$2" module="$3"
   shift 3
   echo "Starting $name (log: logs/$name.log)"
-  (cd "$dir" && env "$@" PYTHONPATH="$REPO_ROOT" python "$module") \
+  (cd "$dir" && env "$@" PYTHONPATH="$REPO_ROOT" python -m "$module") \
     > "logs/$name.log" 2>&1 &
   PIDS+=($!)
 }
@@ -74,16 +83,27 @@ start_service theatre services/theatre 8002 \
 
 start_service booking services/booking 8003 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/booking_db" \
-  REDIS_URL="$REDIS" PAYMENT_SERVICE_URL="http://localhost:8004"
+  REDIS_URL="$REDIS" PAYMENT_SERVICE_URL="http://localhost:8004" \
+  THEATRE_MOCK_HOLD_MODE="${THEATRE_MOCK_HOLD_MODE:-success}"
 
 start_service payment services/payment 8004 \
   AUTH_ENABLED="$AUTH_ENABLED" DATABASE_URL="$PG/payment_db"
 
 # §5.4: N replicas, exactly one ever active via the Postgres advisory
 # lock -- 2 here is enough to demonstrate the failover property locally.
-start_worker reconciliation-sweep-1 services/booking adapters/reconciliation_sweep.py \
+start_worker reconciliation-sweep-1 services/booking adapters.reconciliation_sweep \
   DATABASE_URL="$PG/booking_db"
-start_worker reconciliation-sweep-2 services/booking adapters/reconciliation_sweep.py \
+start_worker reconciliation-sweep-2 services/booking adapters.reconciliation_sweep \
+  DATABASE_URL="$PG/booking_db"
+
+# §5.7/Phase 9.5: same N-replicas-one-active profile as the sweep workers
+# above, for the Outbox relay (confirm_hold/release_hold retries) and the
+# theatre availability sync job (shadow-inventory reconciliation).
+start_worker theatre-outbox-relay-1 services/booking adapters.theatre_outbox_relay \
+  DATABASE_URL="$PG/booking_db"
+start_worker theatre-outbox-relay-2 services/booking adapters.theatre_outbox_relay \
+  DATABASE_URL="$PG/booking_db"
+start_worker theatre-availability-sync services/booking adapters.theatre_availability_sync \
   DATABASE_URL="$PG/booking_db"
 
 start_service user services/user 8005 \

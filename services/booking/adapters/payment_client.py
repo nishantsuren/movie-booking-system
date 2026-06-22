@@ -3,15 +3,14 @@ minimal circuit breaker (§7, §13: "payment service down/slow -> booking
 stays PENDING -> circuit breaker; booking TTL bounds the impact").
 """
 import os
-import time
 from dataclasses import dataclass
-from typing import Callable, Optional, TypeVar
+from typing import Optional
 
 import httpx
 
-PAYMENT_SERVICE_URL = os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8004")
+from adapters.circuit_breaker import CircuitBreaker as _CircuitBreaker
 
-T = TypeVar("T")
+PAYMENT_SERVICE_URL = os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8004")
 
 
 class PaymentServiceUnavailable(RuntimeError):
@@ -30,44 +29,20 @@ class Payment:
     status: str
 
 
-class CircuitBreaker:
-    """Closed / open / half-open. Opens after `failure_threshold`
-    consecutive failures; while open, rejects calls immediately (no
-    network attempt) for `recovery_timeout_seconds`; then allows one
-    trial call (half-open) -- success closes it, failure reopens it."""
+class CircuitBreaker(_CircuitBreaker):
+    """Thin payment-specific subclass: defaults `trips_on` to
+    PaymentServiceUnavailable rather than the generic base's bare
+    `Exception`, so constructing this without an explicit `trips_on`
+    (as Phase 5's own circuit-breaker test still does) keeps raising the
+    same concrete type it always did, pre-Phase-9.5-refactor."""
 
-    def __init__(self, failure_threshold: int = 3, recovery_timeout_seconds: float = 30.0):
-        self._failure_threshold = failure_threshold
-        self._recovery_timeout_seconds = recovery_timeout_seconds
-        self._consecutive_failures = 0
-        self._opened_at: Optional[float] = None
-
-    @property
-    def is_open(self) -> bool:
-        return self._state() == "open"
-
-    def _state(self) -> str:
-        if self._opened_at is None:
-            return "closed"
-        if time.monotonic() - self._opened_at >= self._recovery_timeout_seconds:
-            return "half-open"
-        return "open"
-
-    def call(self, fn: Callable[[], T]) -> T:
-        state = self._state()
-        if state == "open":
-            raise PaymentServiceUnavailable("circuit open -- payment service recently failed")
-        try:
-            result = fn()
-        except PaymentServiceUnavailable:
-            self._consecutive_failures += 1
-            if state == "half-open" or self._consecutive_failures >= self._failure_threshold:
-                self._opened_at = time.monotonic()
-            raise
-        else:
-            self._consecutive_failures = 0
-            self._opened_at = None
-            return result
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        recovery_timeout_seconds: float = 30.0,
+        trips_on=PaymentServiceUnavailable,
+    ):
+        super().__init__(failure_threshold, recovery_timeout_seconds, trips_on)
 
 
 class PaymentClient:
