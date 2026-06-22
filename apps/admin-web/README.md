@@ -1,73 +1,53 @@
-# React + TypeScript + Vite
+# admin-web
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Admin SPA (Phase 9, design `docs/design.md` §3/§4.5/§4.6): movie/
+theatre/screen/showtime CRUD, plus the seat-layout canvas editor (line/
+grid/curve/single-seat placement tools, multi-select bulk edit) with
+draft-lock UX (held/blocked-with-holder-identity/stale banners, 25s
+heartbeat, explicit release). All backend calls go through the routing
+service (never directly to a backend service); the API base URL is
+env-configured (`VITE_API_BASE_URL`, see `.env`), never hardcoded.
 
-Currently, two official plugins are available:
+Served under the `/admin/` path prefix (not the domain root, unlike
+customer-web) — see `vite.config.ts`'s `base` option.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Develop
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev          # Vite dev server, fast HMR -- fine for active development
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+The dev server still talks to the real backend (`scripts/dev.sh` from
+the repo root) -- there's no mock layer here.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## Build and deploy
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+The app is actually served from the local CDN mock (`local-cdn-mock`)
+under `/admin/`, not the Vite dev server (§3.1) -- the SPA's bundle and
+the routing service are different origins, exactly like production.
+
+```bash
+npm run build:deploy   # builds, then copies dist/ into ../../local-cdn-mock/static/admin/
 ```
+
+## E2E tests
+
+Playwright, run against the bundle as actually served
+(`http://localhost:8006/admin/`, see `playwright.config.ts`), not the
+dev server:
+
+```bash
+npm run build:deploy    # refresh the served bundle first
+npm run test:e2e
+```
+
+Requires the full backend stack up (`scripts/dev.sh`) and a real
+Postgres reachable at `THEATRE_DATABASE_URL` (`e2e/db.ts` backdates the
+seat-layout lock's heartbeat timestamp directly, for the staleness test
+in `concurrent-edit.spec.ts` -- same technique the Python integration
+tests and customer-web's E2E suite use) and the customer-web bundle
+also deployed and served at `http://localhost:8006/` (the cross-app
+test in `canvas-author-and-cross-app-render.spec.ts` navigates there
+directly to confirm a layout authored here actually renders in the
+other app's seatmap).

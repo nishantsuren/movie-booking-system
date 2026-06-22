@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
@@ -116,6 +116,16 @@ class SPAStaticFiles(StaticFiles):
 for spa_name in ("customer", "admin"):
     spa_dir = BASE_DIR / "static" / spa_name
     spa_dir.mkdir(parents=True, exist_ok=True)
+
+@app.get("/admin")
+def admin_trailing_slash_redirect() -> RedirectResponse:
+    """Starlette's Mount("/admin", ...) below only matches "/admin/...";
+    a bare "/admin" (no trailing slash) falls all the way through to the
+    "/" mount instead and silently serves customer-web's bundle (found
+    by a real user hitting exactly this URL). Must be registered before
+    the "/" mount, since routes are matched in registration order."""
+    return RedirectResponse(url="/admin/")
+
 
 app.mount("/admin", SPAStaticFiles(directory=BASE_DIR / "static" / "admin", html=True), name="admin-spa")
 app.mount("/", SPAStaticFiles(directory=BASE_DIR / "static" / "customer", html=True), name="customer-spa")

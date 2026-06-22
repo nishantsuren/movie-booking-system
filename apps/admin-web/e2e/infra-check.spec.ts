@@ -22,6 +22,18 @@ test("CORS allows admin-web's origin to call the routing service", async ({ page
   expect(result.status).toBe(200);
 });
 
+test("bare /admin (no trailing slash) redirects to the admin bundle, not customer-web's", async ({ page }) => {
+  // Found by a real user: Starlette's Mount("/admin", ...) only matches
+  // "/admin/...", so a bare "/admin" fell all the way through to the "/"
+  // mount and silently served customer-web's bundle instead (200, no
+  // error, just the wrong app -- looked like "the admin UI has no
+  // content, just a header and a link to the customer app").
+  const resp = await page.goto("http://localhost:8006/admin");
+  expect(new URL(page.url()).pathname).toBe("/admin/");
+  expect(resp?.status()).toBe(200);
+  await expect(page.locator(".app-header")).toContainText("MovieTicket Admin");
+});
+
 test("SPA fallback serves index.html for a direct navigation to a client-side /admin route", async ({ page }) => {
   const resp = await page.goto("movies/some-fake-id-not-a-real-file");
   expect(resp?.status()).toBe(200);

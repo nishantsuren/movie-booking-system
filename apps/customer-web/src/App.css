@@ -6,6 +6,21 @@
   color: #1a1a1a;
 }
 
+/* Baseline for every input/select/textarea in the app -- the
+   city-select and date-picker have no wrapper class, so without this
+   they fell back entirely to native OS control styling. */
+.app input,
+.app select,
+.app textarea {
+  background: #fff;
+  color: #1a1a1a;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  padding: 0.4rem;
+  font-size: 1rem;
+  font-family: inherit;
+}
+
 .app-header {
   padding: 1rem 0;
   border-bottom: 1px solid #ddd;
@@ -85,6 +100,7 @@
   justify-content: center;
   cursor: pointer;
   background: #fff;
+  color: #1a1a1a;
 }
 
 .seat[data-status="AVAILABLE"] {
@@ -151,6 +167,7 @@
 
 .secondary-button {
   background: #fff;
+  color: #1a1a1a;
   border: 1px solid #ccc;
   border-radius: 6px;
   padding: 0.6rem 1.2rem;

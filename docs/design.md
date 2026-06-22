@@ -26,7 +26,10 @@ v15 changes from v14 (Phase 7): `USER` is implemented as a table literally named
 
 v16 changes from v15 (Phase 8 -- the customer SPA, React+Vite+TypeScript, exposed several gaps a backend-only test suite never could): (1) three customer-facing read endpoints from Appendix A were never actually built in Phases 1-7 (browse-by-API-call never needed them) -- added `GET /cities` (theatre; no human-readable city list existed anywhere), `GET /showtimes/{id}` (theatre, plain), and enriched `GET /movies/{movie_id}/showtimes?city=&date=` (theatre, one low-frequency live call to catalog per request, confirmed acceptable) and `GET /showtimes/{id}/seatmap` (booking, wrapped with movie/theatre/screen/time/price context cached in `SHOWTIME_META` at materialize time -- §4.3's table now also carries `theatre_name`/`screen_name`/`start_time`/`base_price`, not just `movie_title` -- specifically to keep this, the system's highest-volume read path §2, free of any live cross-service call). (2) Three infrastructure gaps a real browser caught that curl-based testing structurally couldn't: the routing service had no CORS headers, so the browser silently blocked every API response from a different-origin SPA (curl never enforces CORS, hence never catching this); the local CDN mock's `StaticFiles` mount had no SPA fallback, so any direct navigation to a client-side route (e.g. a reload mid-flow) 404'd instead of serving `index.html` for React Router to handle; and Vite's default build output directory (`assets/`) collided with the CDN mock's already-documented `GET /assets/{asset_id}` route, which matched bundle filenames as attempted `asset_id` UUIDs and 422'd on every JS/CSS request -- fixed by renaming Vite's output dir (`app-assets/`) rather than touching the established `/assets` contract. (3) Confirmed with user: the post-countdown grace window (§5.6/v14 -- confirm can still succeed after the displayed countdown reaches zero, until the sweep worker actually reclaims the seat) is surfaced explicitly in the UI rather than left as an unadvertised possibility, conditional on the no-double-booking guarantee holding regardless of timing -- which Phases 4 and 6 already prove under real concurrency, so the condition holds and the UI says so.
 
-v17 changes from v16 (Phase 9 -- the admin SPA, exposed a second, larger round of gaps the same way v16 did): (1) six admin-facing list/get endpoints were missing entirely -- not just unbuilt customer-facing ones this time, but the ability to *manage* anything that already exists: `GET /admin/movies` (catalog, includes inactive -- the customer `GET /movies` always filters to `is_active=TRUE` even with no city given, so it can't serve this), `GET /admin/movies/{id}/releases`, `GET /admin/theatres/{id}/screens`, `GET /admin/screens/{id}/seat-layouts`, `GET /admin/seat-layouts/{id}` (standalone, including current lock status -- previously only ever returned as a side effect of create/lock/publish/clone), and `GET /admin/screens/{id}/showtimes`. Confirmed with user: built all six, same reasoning as v16's gaps -- an admin UI structurally cannot manage what it cannot list. (2) A real constraint in §4.5's own contract, found while building the canvas editor: there is no endpoint to add seats to an *already-created* draft -- `PATCH .../seats/{id}` and the bulk variant only ever edit existing seats (relabel/reposition/retype/reprice/deactivate), and `POST .../draft` is the only path that ever inserts new `SEAT_TEMPLATE` rows. This is in fact consistent with §4.5's Builder framing taken literally ("each tool invocation... appending to one in-progress collection before a final build/save") rather than a bug needing a new endpoint: the canvas builds the complete flat seat list entirely client-side first (line/grid/curve/single tools, none of which touch the server), and only the first save persists it in one `POST` call. Editing an already-created draft is therefore select-and-edit-existing-seats only (no further additions) until publish. (3) Same v16-style infrastructure verification, this time for a second app under a *different* path prefix (`/admin/`, not `/`) and confirmed rather than assumed per user's explicit instruction: routing's CORS policy (`allow_origins=["*"]`, v16) and local-cdn-mock's `SPAStaticFiles` (already applied to both the `/` and `/admin` mounts, v16) both already covered admin-web with no further backend changes -- but building admin-web's own Vite config surfaced a need Vite's `base` option exists for precisely: without `base: '/admin/'`, built asset URLs in `index.html` are absolute from the domain root and 404 under a sub-path mount (customer-web, served at the root, never needed this). A related, easy-to-miss Playwright gotcha while *writing* that verification: `page.goto(url)` resolves via `new URL(url, baseURL)`, so a leading `/` in the path discards baseURL's own sub-path entirely (`new URL("/", "http://host/admin")` is `http://host/`, not `http://host/admin/`) -- caught a test that was silently exercising customer-web's bundle instead of admin-web's. Fix: baseURL needs a trailing slash, and test paths must never start with `/`.
+v17 changes from v16 (Phase 9 -- the admin SPA, exposed a second, larger round of gaps the same way v16 did): (1) six admin-facing list/get endpoints were missing entirely -- not just unbuilt customer-facing ones this time, but the ability to *manage* anything that already exists: `GET /admin/movies` (catalog, includes inactive -- the customer `GET /movies` always filters to `is_active=TRUE` even with no city given, so it can't serve this), `GET /admin/movies/{id}/releases`, `GET /admin/theatres/{id}/screens`, `GET /admin/screens/{id}/seat-layouts`, `GET /admin/seat-layouts/{id}` (standalone, including current lock status -- previously only ever returned as a side effect of create/lock/publish/clone), and `GET /admin/screens/{id}/showtimes`. Confirmed with user: built all six, same reasoning as v16's gaps -- an admin UI structurally cannot manage what it cannot list. (2) A real constraint in §4.5's own contract, found while building the canvas editor: there is no endpoint to add seats to an *already-created* draft -- `PATCH .../seats/{id}` and the bulk variant only ever edit existing seats (relabel/reposition/retype/reprice/deactivate), and `POST .../draft` is the only path that ever inserts new `SEAT_TEMPLATE` rows. This is in fact consistent with §4.5's Builder framing taken literally ("each tool invocation... appending to one in-progress collection before a final build/save") rather than a bug needing a new endpoint: the canvas builds the complete flat seat list entirely client-side first (line/grid/curve/single tools, none of which touch the server), and only the first save persists it in one `POST` call. Editing an already-created draft is therefore select-and-edit-existing-seats only (no further additions) until publish. (3) Same v16-style infrastructure verification, this time for a second app under a *different* path prefix (`/admin/`, not `/`) and confirmed rather than assumed per user's explicit instruction: routing's CORS policy (`allow_origins=["*"]`, v16) and local-cdn-mock's `SPAStaticFiles` (already applied to both the `/` and `/admin` mounts, v16) both already covered admin-web with no further backend changes -- but building admin-web's own Vite config surfaced a need Vite's `base` option exists for precisely: without `base: '/admin/'`, built asset URLs in `index.html` are absolute from the domain root and 404 under a sub-path mount (customer-web, served at the root, never needed this). A related, easy-to-miss Playwright gotcha while *writing* that verification: `page.goto(url)` resolves via `new URL(url, baseURL)`, so a leading `/` in the path discards baseURL's own sub-path entirely (`new URL("/", "http://host/admin")` is `http://host/`, not `http://host/admin/`) -- caught a test that was silently exercising customer-web's bundle instead of admin-web's. Fix: baseURL needs a trailing slash, and test paths must never start with `/`. (4) A real user hit the *same underlying gap* in production-shaped traffic, not just in a test config: a bare `GET /admin` (no trailing slash) against local-cdn-mock. Starlette's `Mount("/admin", ...)` only matches `/admin/...` (its compiled path regex requires a `/` after the prefix), so a trailing-slash-less request doesn't match the admin mount at all and falls through to the catch-all `Mount("/", ...)` -- which, being itself an `SPAStaticFiles` with `html=True`, happily serves *customer-web's* `index.html` as its 404 fallback. The result looks exactly like "the admin app has no content, just a header and a link to customer-web" because that's literally what got served -- 200 OK, no error, just the wrong app entirely. Fixed with an explicit `@app.get("/admin")` redirecting to `/admin/` (307), registered before the catch-all mount so it's matched first; covered by a new infra-check E2E test. (5) A real user also hit a contrast bug once the routing fix let them actually see the app: `npm create vite`'s template `index.css` sets `color-scheme: light dark` and a `@media (prefers-color-scheme: dark)` block swapping CSS variables (`--bg`, `--text-h`, etc.) -- neither of which `App.tsx`/`App.css` (hand-written, light-only, no dark variant) ever account for. Under an OS dark preference this produced exactly white-on-white and black-on-black: native form controls (inputs/selects/buttons) silently followed the OS's dark widget theme while `App.css`'s explicit white backgrounds stayed light, and CSS-variable-driven heading colors (`--text-h`, swapped to a near-white value for dark mode) rendered against `App.css`'s white form boxes. Fixed by replacing the unused boilerplate `index.css` with a minimal reset (`box-sizing`, `body` margin/background/color, `color-scheme: light` to pin native widgets) and adding an explicit `background`/`color` to every input/select/textarea/button in `App.css` so none of them depend on native or inherited theming. customer-web's `index.css` has the identical unused boilerplate and the identical latent bug -- not fixed here (out of this phase's scope), flagged for a future pass.
+
+v18 changes from v17 (architectural correction — the aggregator model requires two-phase seat locking, not one): The system was treating its own Redis/Postgres seat inventory as the source of truth for availability across all booking channels. A real aggregator like BookMyShow does not own the seat inventory — the theatre's own ticketing system (Vista, Moviebook, or similar) does, and the same seat is simultaneously bookable via the theatre's website, other aggregators, and box-office terminals. A second, external lock against the theatre's actual ticketing system is required alongside the existing within-platform Redis lock. The Redis lock (§5.1) continues to protect against race conditions between BookMyShow's own concurrent users (the fast, in-process layer). The new `TheatreIntegration` interface (§5.7) provides the external lock that protects against bookings on other portals. Both are required; neither replaces the other. For seatmap availability (§5.7), a sync-based shadow inventory is used: seat availability is periodically pulled from the theatre system and cached in `SHOWTIME_SEAT`, so the seatmap read path remains fast and free of live cross-service calls. The external hold call happens only at seat-selection time, making it the real-time check that actually matters. A `TheatreIntegration` mock implementation (always returns success) is wired in for local development and all existing tests — no existing test changes, only new tests for the new failure modes (§13). A new `theatre_hold_id` column is added to `BOOKING` to track the handle returned by the theatre's system, needed for confirm and release calls. Real theatre API adapters (per POS system: Vista, Moviebook, etc.) are a future enhancement, §16.8.
+
 
 ---
 
@@ -35,7 +38,7 @@ v17 changes from v16 (Phase 9 -- the admin SPA, exposed a second, larger round o
 **Functional** — browse movies → pick theatre/showtime → seat map → lock seats 10 minutes → pay (mocked, always succeeds) → confirm. Lock auto-releases on timeout. Movies have release/end dates, city-level and optionally per theatre (§4.4). Customer and admin web apps (§3), the latter backed by a dedicated admin API surface (§5.5) including a freeform seat-layout authoring tool (§4.5) with exclusive-edit protection (§4.6).
 
 **Non-functional**:
-- No two users can ever book the same seat for the same showtime, including under stampede load.
+- No two users can ever book the same seat for the same showtime, including under stampede load and including concurrent bookings arriving via external channels (the theatre's own website, other aggregators, box-office terminals) — §5.7's external lock addresses the cross-channel case; §5.1's Redis lock addresses the within-platform concurrent-user case.
 - Read traffic must scale independently of write traffic.
 - Theatre seat layouts are fully freeform, creatable entirely through the admin UI (§4.5), with concurrent-edit protection (§4.6).
 - New payment methods, pricing rules, or notification channels must be addable without modifying booking orchestration.
@@ -213,6 +216,7 @@ erDiagram
     float price_paid
     string status
     datetime expires_at
+    string theatre_hold_id "nullable; set after §5.7 external hold succeeds, v17"
   }
   PAYMENT {
     uuid id PK
@@ -280,6 +284,64 @@ Implementation (Phase 6, `services/booking/adapters/reconciliation_sweep.py`): a
 
 `DELETE /bookings/{id}` (cancel): `UPDATE booking SET status = 'CANCELLED' WHERE id = :id AND status = 'PENDING' RETURNING *`, then `SHOWTIME_SEAT` rows locked by this booking revert to `AVAILABLE` and the Redis lock is released. Only `PENDING` bookings can be cancelled this way — refunding a `CONFIRMED` booking is the same out-of-scope question §16.6 already flags.
 
+### 5.7 Theatre integration layer — the aggregator lock (v17)
+
+#### Why this is required
+
+The existing Redis lock (§5.1) protects BookMyShow's own seat inventory against concurrent BookMyShow users — it is a within-platform guard. It does not protect against a user on a different channel (the theatre's own website, another aggregator, the box-office terminal) booking the same seat for the same showtime simultaneously. The theatre's ticketing system is the actual seat inventory owner; BookMyShow holds a synchronized shadow copy. A seat that appears available in BookMyShow's `SHOWTIME_SEAT` table may have already been taken in the theatre's system since the last sync. The external lock is what makes the seat hold real.
+
+#### The two-phase lock sequence
+
+```
+1. Acquire Redis lock (§5.1)          — within-platform, <1ms, protects against BookMyShow users
+2. Call theatre.hold_seats()          — external, ~100-500ms, protects against all other channels
+   - Conflict → release Redis lock, return 409 with conflicting seats
+   - Theatre API timeout/error → release Redis lock, return 503 (retryable)
+   - Success → store theatre_hold_id on the PENDING booking row
+3. Create PENDING booking              — as before
+4. Customer pays                       — as before
+5. Call theatre.confirm_hold()        — external, tells theatre to convert hold to a real booking
+6. Confirm booking in Postgres,        — as before
+   release Redis lock
+```
+
+On expiry or cancellation, the sweep worker (§5.4) and the cancel endpoint (§5.6) additionally call `theatre.release_hold(theatre_hold_id)` to free the seat in the theatre's system.
+
+#### The TheatreIntegration interface
+
+```python
+class HoldResult:
+    success: bool
+    theatre_hold_id: str | None       # populated on success; opaque token from theatre's system
+    conflicting_seat_ids: list[str]   # populated on conflict
+
+class TheatreIntegration(Protocol):
+    def hold_seats(self, showtime_id: str, seat_ids: list[str],
+                   hold_duration_seconds: int) -> HoldResult: ...
+    def confirm_hold(self, theatre_hold_id: str) -> None: ...
+    def release_hold(self, theatre_hold_id: str) -> None: ...
+    def sync_availability(self, showtime_id: str) -> list[SeatStatus]: ...
+```
+
+`BookingOrchestrator` takes `TheatreIntegration` as a constructor-injected dependency alongside the existing `SeatLocker`, `SeatRepository`, and `PaymentClient`. This is the same Dependency Inversion pattern already in place — no orchestrator code changes when a real adapter replaces the mock.
+
+#### Seatmap availability — sync-based shadow inventory
+
+The `GET /showtimes/{id}/seatmap` path (the system's highest-volume read, §2) must never make a live call to the theatre's system on every request. Instead: a background sync job (per-showtime, triggered on a configurable interval — e.g. every 60s for active showtimes, less frequently for future ones) calls `theatre.sync_availability()` and updates `SHOWTIME_SEAT` rows that have changed state externally (e.g. a seat booked via another portal). The seatmap read path serves the shadow copy as before.
+
+Consequence: a seat taken on another portal will appear available in BookMyShow until the next sync. A user selecting that seat will get to the `hold_seats()` call and receive a conflict there — a clean 409, recoverable, mildly inconvenient. This is the standard aggregator trade-off: fast reads (from cache) with an accurate lock at selection time.
+
+The sync job lives in `services/booking/adapters/theatre_availability_sync.py`, structured analogously to the sweep worker — N replicas, one active via Postgres advisory lock, independent of request-handling capacity.
+
+#### Mock implementation for local development
+
+`MockTheatreIntegration` always returns success with a generated `theatre_hold_id` (a UUID). All existing tests continue to pass unchanged — the mock is wired via the same Dependency Inversion mechanism used by the rest of the test suite (`MockSeatLocker`, etc.). New tests exercise the failure paths specifically: hold conflict, theatre API timeout, confirm failure after a successful hold.
+
+#### BOOKING schema addition
+
+`BOOKING.theatre_hold_id` (nullable string, v17): set when the external hold succeeds in step 2 above. Used for the `confirm_hold` and `release_hold` calls. Null only for bookings created before this feature existed (migration: add column with NULL default, no backfill needed).
+
+
 ---
 
 ## 6. API contracts
@@ -290,7 +352,7 @@ See Appendix A (customer-facing) and Appendix C (admin-facing). Create endpoints
 
 ## 7. Design patterns applied
 
-Strategy (`SeatLockManager`, `PricingStrategy`, `EventPublisher`), Factory (`SeatLayoutFactory`), **Builder** (`SeatLayoutBuilder`, §4.5), **Pessimistic locking** (draft edit lock, §4.6 — distinct from the booking seat lock: heartbeat-based with no fixed TTL, no sweep worker, since the access pattern and contention profile are entirely different), Repository, State, Observer/pub-sub, Saga, Chain of Responsibility, Circuit breaker, CQRS-lite, Outbox, Bulkhead.
+Strategy (`SeatLockManager`, `PricingStrategy`, `EventPublisher`, **`TheatreIntegration`** — same pattern, same reason: a mock for tests and local dev, real adapters per POS system in production), Factory (`SeatLayoutFactory`), **Builder** (`SeatLayoutBuilder`, §4.5), **Pessimistic locking** (draft edit lock, §4.6), Repository, State, Observer/pub-sub, **Saga** (the two-phase lock sequence in §5.7 is itself a saga: Redis lock → external hold → payment → confirm, each with a compensating release on failure), Chain of Responsibility, Circuit breaker (now applies to the theatre API calls in addition to the payment client), CQRS-lite, Outbox (now also covers the confirm-hold and release-hold retry paths, §13), Bulkhead.
 
 ---
 
@@ -303,24 +365,42 @@ class SeatLocker(Protocol):
     def acquire(self, showtime_id: str, seat_ids: list[str], holder: str) -> LockResult: ...
     def release(self, showtime_id: str, seat_ids: list[str]) -> None: ...
 
+class TheatreIntegration(Protocol):          # NEW — §5.7
+    def hold_seats(self, showtime_id: str, seat_ids: list[str],
+                   hold_duration_seconds: int) -> HoldResult: ...
+    def confirm_hold(self, theatre_hold_id: str) -> None: ...
+    def release_hold(self, theatre_hold_id: str) -> None: ...
+
 class BookingOrchestrator:
     def __init__(self, seats: SeatRepository, locker: SeatLocker,
+                 theatre: TheatreIntegration,          # NEW — §5.7
                  bookings: BookingRepository, payments: PaymentClient,
                  events: EventPublisher):
-        self._seats, self._locker, self._bookings = seats, locker, bookings
-        self._payments, self._events = payments, events
+        self._seats, self._locker, self._theatre = seats, locker, theatre
+        self._bookings, self._payments, self._events = bookings, payments, events
 
     def select_seats(self, showtime_id: str, seat_ids: list[str], user_id: str, idempotency_key: str) -> Booking:
-        result = self._locker.acquire(showtime_id, seat_ids, holder=user_id)
-        if not result.success:
-            raise SeatsUnavailable(result.conflicting_seat_ids)
-        return self._bookings.create_pending(showtime_id, seat_ids, user_id, idempotency_key)
+        # Step 1: within-platform lock (fast, <1ms)
+        lock_result = self._locker.acquire(showtime_id, seat_ids, holder=user_id)
+        if not lock_result.success:
+            raise SeatsUnavailable(lock_result.conflicting_seat_ids)
+        # Step 2: external lock against the theatre's system (§5.7)
+        hold_result = self._theatre.hold_seats(showtime_id, seat_ids, hold_duration_seconds=600)
+        if not hold_result.success:
+            self._locker.release(showtime_id, seat_ids)   # compensate step 1
+            raise SeatsUnavailable(hold_result.conflicting_seat_ids)
+        return self._bookings.create_pending(
+            showtime_id, seat_ids, user_id, idempotency_key,
+            theatre_hold_id=hold_result.theatre_hold_id   # store for later confirm/release
+        )
 
     def confirm(self, booking_id: str, payment_id: str) -> Booking:
         booking = self._bookings.get(booking_id)
         booking.transition_to(BookingStatus.CONFIRMED)
         self._seats.mark_booked(booking.showtime_id, booking.seat_ids)
         self._locker.release(booking.showtime_id, booking.seat_ids)
+        # confirm_hold is written to the Outbox in the same transaction as the booking confirm;
+        # a relay retries it independently — see §5.7 and §13 for the failure case
         self._bookings.save(booking)
         self._events.publish(BookingConfirmed(booking_id=booking.id))
         return booking
@@ -395,6 +475,11 @@ Primary plus N async read replicas per service; automated failover; strong consi
 | Booking service instance crash | In-flight request fails, no orphaned state | Services are stateless; lock expires via TTL. |
 | Postgres primary failover | Brief write unavailability | Standard replica promotion (§12); retries per §11.3. |
 | Two requests somehow race past Redis | Theoretically both believe they hold a lock | Structurally prevented — §5.3's PK-scoped conditional update. |
+| Theatre API returns conflict on hold_seats (seat taken on another portal) | User's seat selection fails | Return 409 with conflicting seat IDs, release Redis lock immediately — same UX as a within-platform conflict. Shadow inventory updated on next sync so the seat shows as unavailable. |
+| Theatre API times out or returns 5xx during hold_seats | Booking creation cannot proceed | Return 503 (retryable), release Redis lock. Circuit breaker trips if the theatre API is consistently degraded — fail fast rather than accumulating held Redis locks. |
+| Theatre API fails during confirm_hold after payment succeeds | Booking is confirmed in BookMyShow but the theatre system may not know | Retry confirm_hold with bounded backoff (via the Outbox pattern — write the pending confirm-hold call in the same transaction as the booking confirm, a relay retries it independently). If retries are exhausted, flag for manual reconciliation — this is an ops concern, not a data-integrity one, since BookMyShow has the payment. |
+| Theatre API fails during release_hold (on expiry or cancel) | Seat may stay held in the theatre's system after BookMyShow releases it | Retry release_hold with bounded backoff (same Outbox relay). Theatre systems typically have their own TTL on holds anyway — a failed release is a brief over-lock on the theatre's side, not a permanent problem. |
+| theatre_hold_id is null on a confirm/cancel for a booking created before v17 | release_hold has no handle to call with | Skip the theatre API call for null theatre_hold_id — pre-v17 bookings were against the mock implementation which tracked no real holds. |
 
 ---
 
@@ -406,7 +491,7 @@ Metrics (request rate/latency, lock conflict rate, booking funnel drop-off, swee
 
 ## 15. Production readiness checklist (near-term, before real traffic)
 
-Real API gateway taking over the routing service's slot (§3.2), `AUTH_ENABLED=true` everywhere; event bus; observability stack; secrets management; CI/CD with the §5.4 concurrency test suite plus draft-lock contention tests (§4.6); the local CDN mock (§3.1) replaced by real static hosting and a real CDN + object storage.
+Real API gateway taking over the routing service's slot (§3.2), `AUTH_ENABLED=true` everywhere; event bus; observability stack; secrets management; CI/CD with the §5.4 concurrency test suite plus draft-lock contention tests (§4.6); the local CDN mock (§3.1) replaced by real static hosting and a real CDN + object storage. **Real TheatreIntegration adapters** (one per theatre POS system — see §16.8) replace the `MockTheatreIntegration` that exists locally; the interface and wiring stay unchanged.
 
 ---
 
@@ -426,6 +511,12 @@ If sweep-lag metrics ever justify it: Redis keyspace notifications bridged throu
 
 ### 16.5 Theatre-manager role (partial admin scope)
 Deferred until there's a real operator to design the scoping model against.
+
+### 16.8 Real TheatreIntegration adapters (per POS system)
+
+The local development and test environment uses `MockTheatreIntegration`, which always succeeds. Production requires a concrete implementation per theatre POS system the platform integrates with (Vista, Moviebook, proprietary systems, etc.). Each adapter implements the `TheatreIntegration` Protocol (§5.7) and is responsible for: translating BookMyShow's `showtime_id`/`seat_id` space into the theatre's own identifier space; handling the theatre API's specific authentication scheme; mapping the theatre's error codes to BookMyShow's `HoldResult.success = False` / `conflicting_seat_ids` contract; and implementing `sync_availability` for the shadow-inventory sync job.
+
+Adapter registry: `THEATRE.integration_type` (e.g. `"vista"`, `"moviebook"`, `"mock"`) determines which adapter is injected at runtime — not a code change, a configuration change, for each onboarded theatre. A theatre with `integration_type = "mock"` continues to work exactly as the system does today, which covers theatres that don't have a POS API yet (manual inventory management through the admin UI, §3).
 
 ### 16.6 Showtime cancellation workflow (versus deactivation)
 Flagged in §13 rather than resolved: as of v10, "deleting" a showtime only flips `is_active` to `false` (§4.3) — there is no hard delete to reconsider. The open question is what *should* happen to bookings that already exist against a showtime that gets deactivated; that likely needs a real cancellation workflow (refunds, notifications) rather than today's "deactivation is silent and has no effect on existing bookings" behavior. Out of scope until refunds/notifications exist to support it.
@@ -502,7 +593,7 @@ movie-booking-system/
 └── infra/                                 (docker-compose: postgres x N, redis cluster, seed data)
 ```
 
-Build order: (1) catalog + theatre with seed data, plus the local CDN mock, (2) booking service seatmap endpoint and showtime-seat materialization with fail-closed retry (§4.3), (3) seat locking in isolation with the §5.4 concurrency test suite, (4) booking creation + mocked payment + confirm, idempotency from the start, (5) reconciliation sweep worker, (6) routing service in front of everything (no auth), (7) admin API + the seat-layout canvas editor (§4.5) + draft edit lock (§4.6), (8) customer web app, (9) admin web app, (10) flip `AUTH_ENABLED` on and verify in staging before the production checklist (§15). Virtual queue (§16.1), multi-event-type support (§16.2), full notification system (§16.3), event-driven seat-release (§16.4), theatre-manager role (§16.5), and a showtime cancellation workflow (§16.6) are explicitly out of this build order.
+Build order: (1) catalog + theatre with seed data, plus the local CDN mock, (2) booking service seatmap endpoint and showtime-seat materialization with fail-closed retry (§4.3), (3) seat locking in isolation with the §5.4 concurrency test suite, (4) booking creation + mocked payment + confirm, idempotency from the start, (5) reconciliation sweep worker, (6) routing service in front of everything (no auth), (7) admin API + the seat-layout canvas editor (§4.5) + draft edit lock (§4.6), (8) customer web app, (9) admin web app, (9.5) TheatreIntegration interface + mock wired into booking saga + external-hold failure-mode tests, (10) flip `AUTH_ENABLED` on and verify in staging before the production checklist (§15). Virtual queue (§16.1), multi-event-type support (§16.2), full notification system (§16.3), event-driven seat-release (§16.4), theatre-manager role (§16.5), and a showtime cancellation workflow (§16.6) are explicitly out of this build order.
 
 ## Appendix C — admin-facing API contracts
 
