@@ -19,13 +19,7 @@ import redis
 from redis.backoff import ExponentialBackoff
 from redis.retry import Retry
 
-DEFAULT_LOCK_TTL_SECONDS = 600
-
-# §11.3-style retry policy for transient connection failures (§11.4:
-# "single-node failure: Redis Cluster's own replica promotion plus client
-# retry -- no Postgres fallback"). Bounded attempts, exponential backoff.
-DEFAULT_RETRY_ATTEMPTS = 3
-DEFAULT_RETRY_BACKOFF_BASE_SECONDS = 0.1
+from config import REDIS_LOCK_TTL_SECONDS, REDIS_RETRY_ATTEMPTS, REDIS_RETRY_BACKOFF_BASE_SECONDS
 
 # Atomic check-then-set across every requested key in one round trip
 # (§5.1). All-or-nothing: if any key already exists, nothing is set and
@@ -62,8 +56,8 @@ def lock_key(showtime_id: str, seat_id: str) -> str:
 
 def build_redis_client(
     url: Optional[str] = None,
-    retry_attempts: int = DEFAULT_RETRY_ATTEMPTS,
-    backoff_base_seconds: float = DEFAULT_RETRY_BACKOFF_BASE_SECONDS,
+    retry_attempts: int = REDIS_RETRY_ATTEMPTS,
+    backoff_base_seconds: float = REDIS_RETRY_BACKOFF_BASE_SECONDS,
 ) -> "redis.Redis":
     return redis.Redis.from_url(
         url or os.environ["REDIS_URL"],
@@ -83,7 +77,7 @@ def build_redis_client(
 
 
 class RedisSeatLocker:
-    def __init__(self, client: Optional["redis.Redis"] = None, ttl_seconds: int = DEFAULT_LOCK_TTL_SECONDS):
+    def __init__(self, client: Optional["redis.Redis"] = None, ttl_seconds: int = REDIS_LOCK_TTL_SECONDS):
         self._redis = client or build_redis_client()
         self._ttl_seconds = ttl_seconds
         self._acquire_script = self._redis.register_script(_ACQUIRE_SCRIPT)

@@ -20,6 +20,7 @@ from adapters.postgres_outbox_repository import PostgresOutboxRepository
 from adapters.postgres_seat_repository import PostgresSeatRepository
 from adapters.redis_seat_locker import RedisSeatLocker
 from adapters.showtime_meta_repository import ShowtimeMetaRepository
+from config import BOOKING_HOLD_SECONDS
 from domain.booking import (
     Booking,
     BookingHoldExpired,
@@ -31,8 +32,6 @@ from domain.booking import (
     ShowtimeNotMaterialized,
 )
 from domain.theatre_integration import TheatreIntegration, TheatreIntegrationUnavailable
-
-BOOKING_HOLD_SECONDS = 600  # matches RedisSeatLocker's default lock TTL (§5.1/§5.4)
 
 
 class BookingConfirmedEvent:
@@ -189,15 +188,25 @@ class BookingOrchestrator:
 
         self._locker.release(booking.showtime_id, booked_seat_ids)
 
-        # §5.7: confirm_hold is written to the Outbox in the *same*
-        # transaction as the booking confirm above -- a separate relay
-        # (adapters/theatre_outbox_relay.py) calls the theatre API and
-        # retries independently, so this hot path never blocks on
-        # theatre API latency. Skipped cleanly when there's no external
-        # hold to confirm: pre-v18 bookings (§13, no backfill) and any
-        # booking whose hold_seats call never actually succeeded.
+        # §5.7: try confirm_hold synchronously first. A confirm landing
+        # near the tail of the hold's TTL has no slack left -- if this
+        # only ever went through the Outbox relay (poll interval +
+        # possible backoff retries), the theatre's own hold could expire
+        # and release the seat on their side before the relay ever got
+        # to it, a real cross-channel double-booking risk. Calling it
+        # inline here closes that race in the common case (theatre API
+        # healthy) with no relay involvement and no poll-interval delay
+        # at all. The Outbox is the *fallback* for when this synchronous
+        # attempt itself fails -- exactly the scenario it was built for
+        # (§13: a genuine downstream failure, not routine latency).
+        # Skipped entirely when there's no external hold to confirm:
+        # pre-v18 bookings (no backfill) and any booking whose
+        # hold_seats call never actually succeeded.
         if booking.theatre_hold_id is not None:
-            self._outbox.enqueue("CONFIRM_HOLD", booking_id, booking.theatre_hold_id)
+            try:
+                self._theatre.confirm_hold(booking.theatre_hold_id)
+            except TheatreIntegrationUnavailable:
+                self._outbox.enqueue("CONFIRM_HOLD", booking_id, booking.theatre_hold_id)
 
         self._events.publish(BookingConfirmedEvent(booking_id=booking_id))
         return confirmed

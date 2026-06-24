@@ -2,15 +2,13 @@
 minimal circuit breaker (§7, §13: "payment service down/slow -> booking
 stays PENDING -> circuit breaker; booking TTL bounds the impact").
 """
-import os
 from dataclasses import dataclass
 from typing import Optional
 
 import httpx
 
 from adapters.circuit_breaker import CircuitBreaker as _CircuitBreaker
-
-PAYMENT_SERVICE_URL = os.getenv("PAYMENT_SERVICE_URL", "http://localhost:8004")
+from config import CIRCUIT_BREAKER_FAILURE_THRESHOLD, CIRCUIT_BREAKER_RECOVERY_SECONDS, PAYMENT_SERVICE_URL
 
 
 class PaymentServiceUnavailable(RuntimeError):
@@ -38,8 +36,8 @@ class CircuitBreaker(_CircuitBreaker):
 
     def __init__(
         self,
-        failure_threshold: int = 3,
-        recovery_timeout_seconds: float = 30.0,
+        failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        recovery_timeout_seconds: float = CIRCUIT_BREAKER_RECOVERY_SECONDS,
         trips_on=PaymentServiceUnavailable,
     ):
         super().__init__(failure_threshold, recovery_timeout_seconds, trips_on)

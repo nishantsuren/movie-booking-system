@@ -6,7 +6,6 @@ seats, mocked payment, confirm, cancel (§5.6, §7/§8, Phase 5);
 TheatreIntegration -- the external/aggregator lock (§5.7, Phase 9.5).
 """
 import hashlib
-import os
 from datetime import datetime
 from typing import Optional
 from uuid import UUID
@@ -22,6 +21,8 @@ from adapters.postgres_seat_repository import PostgresSeatRepository
 from adapters.redis_seat_locker import RedisSeatLocker
 from adapters.showtime_meta_repository import ShowtimeMetaRepository
 from application.booking_orchestrator import BookingOrchestrator
+from application.seat_finder import find_seat_groups
+from config import AUTH_ENABLED, THEATRE_MOCK_CONFIRM_HOLD_FAILS, THEATRE_MOCK_HOLD_MODE
 from db import get_db
 from domain.booking import (
     BookingHoldExpired,
@@ -36,8 +37,6 @@ from domain.theatre_integration import TheatreIntegrationUnavailable
 from shared.auth.auth import AuthContext, get_auth_context
 from shared.events.events import LoggingEventPublisher
 
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
-
 app = FastAPI(title="Booking service")
 
 _event_publisher = LoggingEventPublisher()
@@ -49,7 +48,17 @@ _seat_locker = RedisSeatLocker()
 # for the new failure-path tests (a)/(b), the same way earlier phases
 # stopped/restarted a real service process to simulate a downstream
 # outage -- there's no real theatre API here to actually fail on demand.
-_theatre_integration = MockTheatreIntegration(hold_mode=os.getenv("THEATRE_MOCK_HOLD_MODE", "success"))
+# THEATRE_MOCK_CONFIRM_HOLD_FAILS exists for the same reason, one layer
+# further in: confirm() now tries confirm_hold synchronously first
+# (closing the race where a confirm landing near the tail of the hold's
+# TTL could lose to the theatre's own hold expiring before the Outbox
+# relay ever got to it) and only falls back to the Outbox if that
+# synchronous attempt itself fails -- this env var is what lets a test
+# force that fallback path against the live process.
+_theatre_integration = MockTheatreIntegration(
+    hold_mode=THEATRE_MOCK_HOLD_MODE,
+    confirm_hold_should_fail=THEATRE_MOCK_CONFIRM_HOLD_FAILS,
+)
 
 
 @app.get("/health")
@@ -205,6 +214,35 @@ def get_seatmap(showtime_id: UUID, conn=Depends(get_db)) -> dict:
         "base_price": meta["base_price"],
         "seats": seats,
     }
+
+
+# --- find-seats (AI agent requirements doc §2.1; agent-service only,
+# not called by the customer SPA directly per design.md Appendix A) ---
+
+
+class FindSeatsPreferences(BaseModel):
+    adjacent: bool = True
+    zone: str = "any"
+    seat_type: str = "any"
+
+
+class FindSeatsRequest(BaseModel):
+    count: int
+    preferences: FindSeatsPreferences = FindSeatsPreferences()
+
+
+@app.post("/showtimes/{showtime_id}/find-seats")
+def find_seats(
+    showtime_id: UUID,
+    body: FindSeatsRequest,
+    conn=Depends(get_db),
+) -> list[dict]:
+    meta = ShowtimeMetaRepository(conn).get(str(showtime_id))
+    if meta is None:
+        raise HTTPException(status_code=404, detail="showtime not found or not materialized")
+
+    all_seats = PostgresSeatRepository(conn).get_all_for_showtime(str(showtime_id))
+    return find_seat_groups(all_seats, body.count, body.preferences.model_dump())
 
 
 # --- booking saga (Appendix A, §5.6, §7/§8) ---

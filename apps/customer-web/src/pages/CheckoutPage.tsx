@@ -110,10 +110,7 @@ export default function CheckoutPage() {
         {pastNominal ? "Hold window: 0:00" : `Hold expires in ${countdownLabel}`}
       </p>
       {pastNominal && (
-        <p data-testid="grace-window-message">
-          Your hold's nominal time is up. Finalizing payment now may still succeed for a few more seconds while we
-          confirm the seat hasn't been released yet — go ahead and try.
-        </p>
+        <p data-testid="grace-window-message">Your hold's nominal time is up.</p>
       )}
 
       <button className="primary-button" disabled={paying} onClick={handlePay} data-testid="pay-button">

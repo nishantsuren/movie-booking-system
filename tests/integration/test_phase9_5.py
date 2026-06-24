@@ -201,13 +201,14 @@ def _wait_for_booking_health(expected_hold_mode: str, timeout: float = 15.0) -> 
     raise TimeoutError(f"booking service did not become healthy (expected hold_mode={expected_hold_mode})")
 
 
-def _start_booking(hold_mode: str) -> None:
+def _start_booking(hold_mode: str, confirm_hold_fails: bool = False) -> None:
     env = os.environ.copy()
     env["DATABASE_URL"] = BOOKING_DB_URL
     env["REDIS_URL"] = REDIS_URL
     env["PAYMENT_SERVICE_URL"] = "http://localhost:8004"
     env["PYTHONPATH"] = REPO_ROOT
     env["THEATRE_MOCK_HOLD_MODE"] = hold_mode
+    env["THEATRE_MOCK_CONFIRM_HOLD_FAILS"] = "true" if confirm_hold_fails else "false"
     log_path = os.path.join(REPO_ROOT, "logs", f"booking-restarted-{hold_mode}.log")
     subprocess.Popen(
         ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8003"],  # no --reload: a stable PID for this test
@@ -245,6 +246,30 @@ def booking_restarted_with_hold_mode():
     if pids:
         time.sleep(1)
     _start_booking("success")
+
+
+@pytest.fixture
+def booking_restarted_with_confirm_hold_failing():
+    """Same automated stop/restart as booking_restarted_with_hold_mode,
+    but for THEATRE_MOCK_CONFIRM_HOLD_FAILS -- hold_mode stays "success"
+    (seat selection must work normally), only confirm_hold's synchronous
+    attempt is forced to fail, so confirm() actually falls back to
+    enqueueing in the Outbox instead of confirming inline."""
+    pids = _find_booking_pids()
+    for pid in pids:
+        os.kill(pid, signal.SIGTERM)
+    if pids:
+        time.sleep(1)
+    _start_booking("success", confirm_hold_fails=True)
+
+    yield
+
+    pids = _find_booking_pids()
+    for pid in pids:
+        os.kill(pid, signal.SIGTERM)
+    if pids:
+        time.sleep(1)
+    _start_booking("success", confirm_hold_fails=False)
 
 
 # --- live-process restart helpers for tests (c)/(d): the Outbox relay
@@ -401,12 +426,43 @@ def test_theatre_circuit_breaker_opens_after_consecutive_failures():
     assert elapsed < 0.05, "an open circuit must reject immediately, with no simulated-timeout delay"
 
 
-# --- (c) confirm_hold fails after a successful hold + payment ---
+# --- (c) confirm_hold: synchronous-first, Outbox as fallback only ---
+
+
+def test_confirm_hold_succeeds_synchronously_and_enqueues_nothing(routing, booking_db):
+    """The common case (theatre API healthy): confirm() must call
+    confirm_hold inline and never touch the Outbox at all. This is what
+    actually closes the race a confirm landing near the tail of the
+    hold's TTL would otherwise hit -- no relay poll-interval delay
+    between 'we know it's confirmed' and 'the theatre knows too'."""
+    seats = [make_seat("A1", 0, 0)]
+    showtime = make_showtime_with_seats(routing, seats, base_price=90.0)
+    seat_ids_by_label = showtime_seat_ids_by_label(booking_db, showtime["id"])
+    a1 = seat_ids_by_label["A1"]
+
+    create_resp = create_booking(routing, showtime["id"], [a1])
+    assert create_resp.status_code == 201, create_resp.text
+    booking_id = create_resp.json()["id"]
+
+    payment_id = pay(routing, booking_id, 90.0)
+    confirm_resp = routing.post(f"/booking/bookings/{booking_id}/confirm", json={"payment_id": payment_id})
+    assert confirm_resp.status_code == 200, confirm_resp.text
+    assert confirm_resp.json()["status"] == "CONFIRMED"
+
+    with booking_db.cursor() as cur:
+        cur.execute("SELECT count(*) AS c FROM pending_theatre_call WHERE booking_id = %s", (booking_id,))
+        assert cur.fetchone()["c"] == 0, (
+            "a successful synchronous confirm_hold must never enqueue an Outbox entry at all"
+        )
 
 
 def test_confirm_hold_failure_retries_via_outbox_without_affecting_confirmed_status(
-    routing, booking_db, stop_external_outbox_relay_workers
+    routing, booking_db, stop_external_outbox_relay_workers, booking_restarted_with_confirm_hold_failing
 ):
+    """The fallback path: the synchronous confirm_hold attempt itself
+    fails against the live process (THEATRE_MOCK_CONFIRM_HOLD_FAILS),
+    so confirm() must fall back to enqueueing in the Outbox -- exactly
+    the scenario it exists for, not the routine path."""
     seats = [make_seat("A1", 0, 0)]
     showtime = make_showtime_with_seats(routing, seats, base_price=90.0)
     seat_ids_by_label = showtime_seat_ids_by_label(booking_db, showtime["id"])
@@ -424,7 +480,9 @@ def test_confirm_hold_failure_retries_via_outbox_without_affecting_confirmed_sta
     with booking_db.cursor() as cur:
         cur.execute("SELECT * FROM pending_theatre_call WHERE booking_id = %s", (booking_id,))
         outbox_row = cur.fetchone()
-    assert outbox_row is not None, "confirm() must enqueue a CONFIRM_HOLD outbox row in the same transaction"
+    assert outbox_row is not None, (
+        "confirm() must fall back to enqueueing a CONFIRM_HOLD outbox row when the synchronous attempt fails"
+    )
     assert outbox_row["call_type"] == "CONFIRM_HOLD"
     assert outbox_row["status"] == "PENDING"
     assert outbox_row["attempts"] == 0
@@ -460,6 +518,72 @@ def test_confirm_hold_failure_retries_via_outbox_without_affecting_confirmed_sta
     with booking_db.cursor() as cur:
         cur.execute("SELECT status FROM pending_theatre_call WHERE id = %s", (outbox_row["id"],))
         assert cur.fetchone()["status"] == "DONE"
+
+
+class _RecordingEventPublisher:
+    """Test-only spy -- records every published event instead of just
+    logging it, so a test can assert exactly which events fired."""
+
+    def __init__(self):
+        self.events = []
+
+    def publish(self, event) -> None:
+        self.events.append(event)
+
+
+def test_confirm_hold_exhausting_retries_raises_and_notifies_and_refunds(
+    routing, booking_db, stop_external_outbox_relay_workers, booking_restarted_with_confirm_hold_failing
+):
+    """Once a CONFIRM_HOLD entry exhausts its retry budget, the theatre
+    never learned to honor a booking we've already taken payment for --
+    the relay must raise TheatreConfirmationAbandoned (caught locally,
+    so it doesn't abort the rest of the batch) and publish both a
+    customer-notification event and a refund-request event."""
+    seats = [make_seat("A1", 0, 0)]
+    showtime = make_showtime_with_seats(routing, seats, base_price=90.0)
+    seat_ids_by_label = showtime_seat_ids_by_label(booking_db, showtime["id"])
+    a1 = seat_ids_by_label["A1"]
+
+    create_resp = create_booking(routing, showtime["id"], [a1])
+    assert create_resp.status_code == 201, create_resp.text
+    booking_id = create_resp.json()["id"]
+
+    payment_id = pay(routing, booking_id, 90.0)
+    confirm_resp = routing.post(f"/booking/bookings/{booking_id}/confirm", json={"payment_id": payment_id})
+    assert confirm_resp.status_code == 200, confirm_resp.text
+
+    with booking_db.cursor() as cur:
+        cur.execute("SELECT id FROM pending_theatre_call WHERE booking_id = %s", (booking_id,))
+        outbox_row = cur.fetchone()
+    assert outbox_row is not None
+
+    recorder = _RecordingEventPublisher()
+    exhausting_relay = TheatreOutboxRelayWorker(
+        database_url=BOOKING_DB_URL,
+        theatre=MockTheatreIntegration(confirm_hold_should_fail=True),
+        events=recorder,
+        max_attempts=1,  # the very first failing pass exhausts the budget
+    )
+    exhausting_relay.run_one_relay_pass()
+
+    with booking_db.cursor() as cur:
+        cur.execute("SELECT status, attempts FROM pending_theatre_call WHERE id = %s", (outbox_row["id"],))
+        row = cur.fetchone()
+    assert row["status"] == "FAILED", "must flag FAILED for manual reconciliation once attempts are exhausted"
+    assert row["attempts"] == 1
+
+    event_names = [e.name for e in recorder.events]
+    assert "TheatreConfirmationFailed" in event_names
+    assert "RefundRequested" in event_names
+    for event in recorder.events:
+        assert event.booking_id == booking_id
+
+    # The booking itself is untouched by any of this -- still CONFIRMED,
+    # since the customer's payment is real and ours to honor regardless
+    # of whether the theatre ever learns about it.
+    with booking_db.cursor() as cur:
+        cur.execute("SELECT status FROM booking WHERE id = %s", (booking_id,))
+        assert cur.fetchone()["status"] == "CONFIRMED"
 
 
 # --- (d) release_hold fails, on both cancel and sweep expiry ---

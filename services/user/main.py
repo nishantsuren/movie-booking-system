@@ -7,8 +7,7 @@ no second auth scheme. `AUTH_ENABLED` stays false everywhere else until
 Phase 10 deliberately flips it (this phase only establishes the
 capability).
 """
-import os
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from uuid import UUID
 
 import bcrypt
@@ -16,13 +15,10 @@ import jwt
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
+from config import AUTH_ENABLED, TOKEN_TTL, VALID_ROLES
 from db import get_db
 from shared.auth.auth import JWT_ALGORITHM, _jwt_secret
 from shared.idempotency.idempotency import IdempotentWriter
-
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
-TOKEN_TTL = timedelta(hours=24)
-VALID_ROLES = ("CUSTOMER", "ADMIN")
 
 app = FastAPI(title="User service")
 

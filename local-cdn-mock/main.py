@@ -8,7 +8,6 @@ per this phase's explicit scope, no AUTH_ENABLED gating here (unlike
 catalog/theatre's admin endpoints).
 """
 import hashlib
-import os
 import uuid
 from pathlib import Path
 from uuid import UUID
@@ -19,13 +18,10 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from starlette.types import Scope
 
+from config import AUTH_ENABLED, BASE_DIR, STORAGE_DIR
 from db import get_db
 from shared.idempotency.idempotency import IdempotentWriter
 
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
-
-BASE_DIR = Path(__file__).parent
-STORAGE_DIR = BASE_DIR / "storage" / "assets"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="Local CDN mock")

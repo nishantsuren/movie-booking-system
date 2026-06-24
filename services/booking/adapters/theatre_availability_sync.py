@@ -32,22 +32,15 @@ import psycopg2
 import psycopg2.extras
 
 from adapters.mock_theatre_integration import MockTheatreIntegration
+from config import (
+    AVAILABILITY_SYNC_LOCK_KEY,
+    AVAILABILITY_SYNC_LOCK_RETRY_SECONDS,
+    AVAILABILITY_SYNC_POLL_INTERVAL_SECONDS,
+    AVAILABILITY_SYNC_SHOWTIME_BATCH_SIZE,
+)
 from domain.theatre_integration import TheatreIntegration
 
 logger = logging.getLogger("theatre_availability_sync")
-
-# Distinct from RECONCILIATION_LOCK_KEY (84236501) and
-# OUTBOX_RELAY_LOCK_KEY (84236502) -- must not collide with any other
-# advisory lock key used against this database.
-AVAILABILITY_SYNC_LOCK_KEY = 84236503
-
-# §5.7: "every 60s for active showtimes, less frequently for future
-# ones" -- this implementation syncs every showtime with at least one
-# non-terminal SHOWTIME_SEAT row on a single configurable interval; a
-# real deployment would tier this by how soon the showtime starts.
-DEFAULT_POLL_INTERVAL_SECONDS = 60
-DEFAULT_LOCK_RETRY_SECONDS = 5
-DEFAULT_SHOWTIME_BATCH_SIZE = 50
 
 
 class TheatreAvailabilitySyncWorker:
@@ -55,9 +48,9 @@ class TheatreAvailabilitySyncWorker:
         self,
         database_url: str,
         theatre: Optional[TheatreIntegration] = None,
-        poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
-        lock_retry_seconds: float = DEFAULT_LOCK_RETRY_SECONDS,
-        showtime_batch_size: int = DEFAULT_SHOWTIME_BATCH_SIZE,
+        poll_interval_seconds: float = AVAILABILITY_SYNC_POLL_INTERVAL_SECONDS,
+        lock_retry_seconds: float = AVAILABILITY_SYNC_LOCK_RETRY_SECONDS,
+        showtime_batch_size: int = AVAILABILITY_SYNC_SHOWTIME_BATCH_SIZE,
     ):
         self._database_url = database_url
         self._theatre = theatre or MockTheatreIntegration(database_url=database_url)

@@ -5,20 +5,11 @@ No authentication or rate limiting here by design — that's the slot a real
 API gateway fills in production. This is intentionally "dumb": it only
 proves the network path between containers works, nothing more.
 """
-import os
-
 import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-SERVICE_MAP = {
-    "catalog": os.getenv("CATALOG_SERVICE_URL", "http://catalog:8000"),
-    "theatre": os.getenv("THEATRE_SERVICE_URL", "http://theatre:8000"),
-    "booking": os.getenv("BOOKING_SERVICE_URL", "http://booking:8000"),
-    "payment": os.getenv("PAYMENT_SERVICE_URL", "http://payment:8000"),
-    "user": os.getenv("USER_SERVICE_URL", "http://user:8000"),
-}
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
+from config import AUTH_ENABLED, SERVICE_MAP
 
 app = FastAPI(title="Routing service")
 client = httpx.AsyncClient(timeout=10.0)

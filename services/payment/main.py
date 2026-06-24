@@ -4,16 +4,14 @@ PAYMENT (§4.1) -- mocked, always succeeds. booking_id is itself the
 idempotency key (§11.1): one payment per booking, ever, no derived hash
 needed since the natural key is already a single field.
 """
-import os
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
 from pydantic import BaseModel
 
+from config import AUTH_ENABLED
 from db import get_db
 from shared.idempotency.idempotency import IdempotentWriter
-
-AUTH_ENABLED = os.getenv("AUTH_ENABLED", "false").lower() == "true"
 
 app = FastAPI(title="Payment service")
 

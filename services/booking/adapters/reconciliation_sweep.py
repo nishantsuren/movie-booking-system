@@ -23,25 +23,18 @@ from typing import Callable, Optional
 
 import psycopg2
 
+from config import RECONCILIATION_BATCH_SIZE, RECONCILIATION_LOCK_KEY, RECONCILIATION_LOCK_RETRY_SECONDS, RECONCILIATION_POLL_INTERVAL_SECONDS
+
 logger = logging.getLogger("reconciliation_sweep")
-
-# Arbitrary, stable bigint -- must not collide with any other advisory
-# lock key used against this database. Nothing else in this codebase
-# uses advisory locks today.
-RECONCILIATION_LOCK_KEY = 84236501
-
-DEFAULT_POLL_INTERVAL_SECONDS = 20  # §5.4: "every 15-30 seconds"
-DEFAULT_LOCK_RETRY_SECONDS = 5
-DEFAULT_BATCH_SIZE = 500
 
 
 class ReconciliationSweepWorker:
     def __init__(
         self,
         database_url: str,
-        poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
-        lock_retry_seconds: float = DEFAULT_LOCK_RETRY_SECONDS,
-        batch_size: int = DEFAULT_BATCH_SIZE,
+        poll_interval_seconds: float = RECONCILIATION_POLL_INTERVAL_SECONDS,
+        lock_retry_seconds: float = RECONCILIATION_LOCK_RETRY_SECONDS,
+        batch_size: int = RECONCILIATION_BATCH_SIZE,
     ):
         self._database_url = database_url
         self._poll_interval_seconds = poll_interval_seconds

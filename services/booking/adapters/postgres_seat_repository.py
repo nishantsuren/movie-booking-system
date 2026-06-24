@@ -36,6 +36,23 @@ class PostgresSeatRepository:
             rows = cur.fetchall()
         return {str(row["id"]): dict(row) for row in rows}
 
+    def get_all_for_showtime(self, showtime_id: str) -> list[dict]:
+        """Every seat materialized for this showtime, any status, with
+        `is_effectively_available` (§5.4) computed alongside. Used by
+        find_seats (requirements doc §2.1): the full set -- not just the
+        currently-available rows -- is needed so zone/centrality
+        normalization (application/seat_finder.py) is computed against
+        the showtime's actual layout bounds, not whatever subset happens
+        to still be free (which would shift the front/middle/back
+        boundaries as seats get booked)."""
+        with self._conn.cursor() as cur:
+            cur.execute(
+                f"SELECT *, {_EFFECTIVELY_AVAILABLE_SQL} AS is_effectively_available "
+                "FROM showtime_seat WHERE showtime_id = %s ORDER BY position_y, position_x",
+                (showtime_id,),
+            )
+            return [dict(row) for row in cur.fetchall()]
+
     def lock_seats(self, showtime_id: str, seat_ids: list[str], booking_id: str, lock_expires_at) -> int:
         """Postgres-side reflection of the Redis lock (§5.3 "Postgres as
         the actual backstop") -- AVAILABLE -> LOCKED, conditional on

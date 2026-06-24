@@ -62,8 +62,19 @@ containerized.
 This creates a shared `.venv/` on first run, installs every service's
 dependencies into it, and starts all five backend services plus the
 local CDN mock plus the routing service as host processes — each with
-`uvicorn --reload`, logging to `logs/<name>.log`. Leave this running in
-its own terminal; `Ctrl+C` stops everything cleanly.
+`uvicorn --reload`, logging to `logs/<name>.log`. Same as
+`./scripts/dev.sh startall`. Leave this running in its own terminal;
+`Ctrl+C` stops everything cleanly.
+
+If something else started it (a backgrounded/headless invocation with
+no TTY to `Ctrl+C` — e.g. an agent), manage it from another terminal
+instead:
+
+```bash
+./scripts/dev.sh list           # what's running, and its PID/port
+./scripts/dev.sh kill <name>    # stop one service or worker by name
+./scripts/dev.sh killall        # stop everything this script started
+```
 
 ## 4. Verify it's actually working
 
@@ -118,7 +129,8 @@ runs on every push.
 ## 6. Tear down
 
 ```bash
-# Stop the native services: Ctrl+C in the dev.sh terminal
+# Stop the native services: Ctrl+C in the dev.sh terminal, or from
+# elsewhere: ./scripts/dev.sh killall
 
 docker compose down          # stop and remove Postgres/Redis containers, keep data
 docker compose down -v       # also remove the Postgres volume — full reset

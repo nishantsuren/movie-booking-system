@@ -8,6 +8,8 @@ exists specifically because those are separately-deployable services).
 import time
 from typing import Callable, Optional, Type, TypeVar
 
+from config import CIRCUIT_BREAKER_FAILURE_THRESHOLD, CIRCUIT_BREAKER_RECOVERY_SECONDS
+
 T = TypeVar("T")
 
 
@@ -24,8 +26,8 @@ class CircuitBreaker:
 
     def __init__(
         self,
-        failure_threshold: int = 3,
-        recovery_timeout_seconds: float = 30.0,
+        failure_threshold: int = CIRCUIT_BREAKER_FAILURE_THRESHOLD,
+        recovery_timeout_seconds: float = CIRCUIT_BREAKER_RECOVERY_SECONDS,
         trips_on: "Type[BaseException] | tuple[Type[BaseException], ...]" = Exception,
     ):
         self._failure_threshold = failure_threshold

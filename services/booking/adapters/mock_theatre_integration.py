@@ -28,9 +28,6 @@ import psycopg2.extras
 from adapters.circuit_breaker import CircuitBreaker
 from domain.theatre_integration import HoldResult, SeatStatus, TheatreIntegrationUnavailable
 
-DEFAULT_BREAKER_FAILURE_THRESHOLD = 3
-DEFAULT_BREAKER_RECOVERY_SECONDS = 30.0
-
 _VALID_HOLD_MODES = {"success", "conflict", "timeout"}
 
 
@@ -49,11 +46,9 @@ class MockTheatreIntegration:
         self._confirm_hold_should_fail = confirm_hold_should_fail
         self._release_hold_should_fail = release_hold_should_fail
         self._database_url = database_url or os.environ.get("DATABASE_URL")
-        self._breaker = breaker or CircuitBreaker(
-            failure_threshold=DEFAULT_BREAKER_FAILURE_THRESHOLD,
-            recovery_timeout_seconds=DEFAULT_BREAKER_RECOVERY_SECONDS,
-            trips_on=TheatreIntegrationUnavailable,
-        )
+        # CircuitBreaker's own defaults (config.CIRCUIT_BREAKER_*) are used
+        # as-is here -- only trips_on needs to be theatre-specific.
+        self._breaker = breaker or CircuitBreaker(trips_on=TheatreIntegrationUnavailable)
 
     def hold_seats(self, showtime_id: str, seat_ids: list[str], hold_duration_seconds: int) -> HoldResult:
         def _do() -> HoldResult:
