@@ -7,18 +7,24 @@ upsert technique as seed.py) as the primary scenario -- three theatres
 in it, two screens per theatre (six screens total) each with a
 genuinely different seat layout (different dimensions, a mix of
 STANDARD/PREMIUM/RECLINER zones, two of the six using a curved back
-row), two movies, and a showtime for each movie in every theatre, all
-at different times -- six showtimes total, every one activated and
-ready to browse/book immediately. Plus a second, lighter-weight city
-(Mumbai, one theatre/screen/layout/showtime, only one of the two movies
-released there) -- not part of the user's original ask, but without it
+row), four movies ("The Last Frame", "Monsoon Drift", "Glass Horizon",
+"Dilli Dhadkan"), and every one of them running in every Bengaluru
+theatre for ALL_MOVIE_RUN_DAYS calendar dates at SHOWS_PER_DAY shows
+per date -- two movies sharing each screen (interleaved, non-colliding
+start times), so manual testing (and the agent's COLLECTING_DATE/
+COLLECTING_SHOWTIME multi-candidate paths) has real multi-date,
+multiple-shows-per-day, multi-theatre data to exercise everywhere, not
+just a single hand-picked theatre. Plus a second, lighter-weight city
+(Mumbai, one theatre/screen/layout, a single showtime for just "The
+Last Frame") -- not part of the user's original ask, but without it
 this script alone left the database in a single-city state that fails
 the automated regression suite's test_movies_browse_is_city_scoped
 (tests/integration/test_phase1.py), which asserts theatres span >= 2
 cities and that GET /catalog/movies?city= actually scopes results
-differently per city. Mumbai having only one of the two movies released
-is what makes that "differs per city" assertion hold, not just the
-city count.
+differently per city. Mumbai deliberately keeps only one movie/showtime
+(not the full all-movies/all-theatres treatment Bengaluru gets) -- that
+asymmetry is what makes the "differs per city" assertion hold, not just
+the city count.
 
 Unlike seed.py, this goes through the real admin HTTP API (via the
 routing service) rather than writing directly to each database -- a
@@ -57,6 +63,19 @@ SEED_NAMESPACE = uuid.UUID("9f9e9c1a-0000-4000-8000-000000000002")
 
 ADMIN_ID = str(uuid.uuid5(SEED_NAMESPACE, "manual-testing-admin"))
 ADMIN_HEADERS = {"X-Admin-User-Id": ADMIN_ID}
+
+# Every Bengaluru movie runs in every Bengaluru theatre for this many
+# calendar dates, at this many shows/date -- real, multi-date,
+# multiple-shows-per-day seed data rather than the single-showtime-per-
+# movie+theatre shape this script used to have.
+ALL_MOVIE_RUN_DAYS = 10
+SHOWS_PER_DAY = 3
+
+# 6 distinct start hours per screen per day -- two movies share a
+# screen (see screen1_movies/screen2_movies in main()), each taking
+# every other hour so neither movie ever collides with the other's
+# start time.
+SCREEN_HOURS = (9, 11, 13, 16, 18, 21)
 
 
 def seed_id(slug: str) -> str:
@@ -250,9 +269,18 @@ def main() -> None:
 
         movie_one_id = create_movie(client, "The Last Frame", "A director's final cut becomes a citywide mystery.", 138, "English")
         movie_two_id = create_movie(client, "Monsoon Drift", "Two strangers, one flooded highway, one long night.", 121, "Hindi")
-        create_release(client, movie_one_id, city_id)
-        create_release(client, movie_two_id, city_id)
-        print(f"Movies: 'The Last Frame' ({movie_one_id}), 'Monsoon Drift' ({movie_two_id})")
+        movie_three_id = create_movie(
+            client, "Glass Horizon", "A glassmaker's apprentice uncovers a citywide conspiracy in shards of memory.", 132, "English"
+        )
+        movie_four_id = create_movie(
+            client, "Dilli Dhadkan", "A delivery rider chases one last fare through Delhi's longest night.", 145, "Hindi"
+        )
+        for movie_id in (movie_one_id, movie_two_id, movie_three_id, movie_four_id):
+            create_release(client, movie_id, city_id)
+        print(
+            f"Movies: 'The Last Frame' ({movie_one_id}), 'Monsoon Drift' ({movie_two_id}), "
+            f"'Glass Horizon' ({movie_three_id}), 'Dilli Dhadkan' ({movie_four_id})"
+        )
 
         theatre_specs = [
             ("PVR Orion Mall", "t1s1_plain_grid", "t1s2_standard_plus_premium"),
@@ -261,8 +289,33 @@ def main() -> None:
         ]
 
         base_start = (datetime.now(timezone.utc) + timedelta(days=2)).replace(hour=12, minute=0, second=0, microsecond=0)
-        showtime_offset_hours = 0
+        run_start_day = base_start.replace(hour=0, minute=0, second=0, microsecond=0)
 
+        # Two movies share each screen, each taking every other slot in
+        # SCREEN_HOURS so the two never collide on the same start time.
+        # Same assignment on every theatre (the seat layouts already
+        # vary per theatre/screen; which movies show where doesn't need
+        # to).
+        screen1_movies = [
+            (movie_one_id, "The Last Frame", 220.0, SCREEN_HOURS[0::2]),
+            (movie_three_id, "Glass Horizon", 200.0, SCREEN_HOURS[1::2]),
+        ]
+        screen2_movies = [
+            (movie_two_id, "Monsoon Drift", 180.0, SCREEN_HOURS[0::2]),
+            (movie_four_id, "Dilli Dhadkan", 190.0, SCREEN_HOURS[1::2]),
+        ]
+
+        def seed_screen_run(screen_id: str, screen_movies: list[tuple[str, str, float, tuple[int, ...]]]) -> int:
+            count = 0
+            for day_offset in range(ALL_MOVIE_RUN_DAYS):
+                day = run_start_day + timedelta(days=day_offset)
+                for movie_id, title, base_price, hours in screen_movies:
+                    for hour in hours:
+                        create_and_activate_showtime(client, movie_id, title, screen_id, day.replace(hour=hour), base_price)
+                        count += 1
+            return count
+
+        total_bengaluru_showtimes = 0
         for theatre_name, screen1_layout, screen2_layout in theatre_specs:
             print(f"\nTheatre: {theatre_name}")
             theatre_id = create_theatre(client, city_id, theatre_name, "Bengaluru")
@@ -272,38 +325,38 @@ def main() -> None:
             publish_seat_layout(client, screen1_id, f"{theatre_name} - Screen 1 layout", screen1_layout)
             publish_seat_layout(client, screen2_id, f"{theatre_name} - Screen 2 layout", screen2_layout)
 
-            start_one = base_start + timedelta(hours=showtime_offset_hours)
-            showtime_offset_hours += 2
-            start_two = base_start + timedelta(hours=showtime_offset_hours)
-            showtime_offset_hours += 2
-
-            showtime_one = create_and_activate_showtime(client, movie_one_id, "The Last Frame", screen1_id, start_one, base_price=220.0)
-            showtime_two = create_and_activate_showtime(client, movie_two_id, "Monsoon Drift", screen2_id, start_two, base_price=180.0)
-            print(f"    showtime: 'The Last Frame' on Screen 1 at {start_one.isoformat()} (id {showtime_one['id']})")
-            print(f"    showtime: 'Monsoon Drift' on Screen 2 at {start_two.isoformat()} (id {showtime_two['id']})")
+            count_one = seed_screen_run(screen1_id, screen1_movies)
+            count_two = seed_screen_run(screen2_id, screen2_movies)
+            total_bengaluru_showtimes += count_one + count_two
+            print(
+                f"    {ALL_MOVIE_RUN_DAYS} dates x {SHOWS_PER_DAY} shows/date: "
+                f"{count_one} showtimes on Screen 1 ('The Last Frame' + 'Glass Horizon'), "
+                f"{count_two} showtimes on Screen 2 ('Monsoon Drift' + 'Dilli Dhadkan')"
+            )
 
         # Second city, deliberately lighter-weight -- exists so this
         # script alone satisfies the regression suite's multi-city
         # assumption (test_phase1.py::test_movies_browse_is_city_scoped)
         # without needing a separate seed.py run afterward. Only "The
-        # Last Frame" is released here, not "Monsoon Drift" -- that's
-        # what makes the per-city movie set actually differ, which the
-        # same test also asserts, not just the city count.
+        # Last Frame" is released here, none of the other three movies
+        # -- that's what makes the per-city movie set actually differ,
+        # which the same test also asserts, not just the city count.
         mumbai_city_id = ensure_city("city:mumbai", "Mumbai", "Maharashtra")
         print(f"\nCity: Mumbai ({mumbai_city_id}) -- secondary, for multi-city coverage")
         create_release(client, movie_one_id, mumbai_city_id)
         mumbai_theatre_id = create_theatre(client, mumbai_city_id, "PVR Phoenix Mills", "Mumbai")
         mumbai_screen_id = create_screen(client, mumbai_theatre_id, "Screen 1")
         publish_seat_layout(client, mumbai_screen_id, "PVR Phoenix Mills - Screen 1 layout", "mumbai_s1_plain_grid")
-        mumbai_start = base_start + timedelta(hours=showtime_offset_hours)
         mumbai_showtime = create_and_activate_showtime(
-            client, movie_one_id, "The Last Frame", mumbai_screen_id, mumbai_start, base_price=250.0
+            client, movie_one_id, "The Last Frame", mumbai_screen_id, base_start, base_price=250.0
         )
-        print(f"    showtime: 'The Last Frame' on Screen 1 at {mumbai_start.isoformat()} (id {mumbai_showtime['id']})")
+        print(f"    showtime: 'The Last Frame' on Screen 1 at {base_start.isoformat()} (id {mumbai_showtime['id']})")
 
         print(
-            "\nManual-testing seed complete: Bengaluru (3 theatres, 6 screens, 6 distinct seat layouts, "
-            "2 movies, 6 active showtimes) + Mumbai (1 theatre, 1 screen, 1 movie, 1 active showtime)."
+            "\nManual-testing seed complete: Bengaluru (3 theatres, 6 screens, 6 distinct seat layouts, 4 movies, "
+            f"{total_bengaluru_showtimes} active showtimes -- every movie running in every theatre for "
+            f"{ALL_MOVIE_RUN_DAYS} dates x {SHOWS_PER_DAY} shows/date) + Mumbai (1 theatre, 1 screen, 1 movie, "
+            "1 active showtime)."
         )
 
 

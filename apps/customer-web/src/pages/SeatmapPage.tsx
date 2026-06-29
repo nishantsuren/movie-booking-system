@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { getUserId } from "../lib/userId";
 import { ApiError } from "../types";
@@ -10,6 +10,11 @@ const PIXELS_PER_UNIT = 40;
 export default function SeatmapPage() {
   const { showtimeId } = useParams<{ showtimeId: string }>();
   const navigate = useNavigate();
+  // Present only when this page was reached via the agent's chat
+  // hand-off link -- forwarded on unchanged, never acted on otherwise,
+  // so a customer browsing here directly sees zero behavior change.
+  const [searchParams] = useSearchParams();
+  const agentSessionId = searchParams.get("agent_session_id");
 
   const [seatmap, setSeatmap] = useState<Seatmap | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -44,7 +49,11 @@ export default function SeatmapPage() {
     setError(null);
     try {
       const booking = await api.createBooking(showtimeId, Array.from(selected), getUserId());
-      navigate(`/bookings/${booking.id}/checkout`);
+      navigate(
+        agentSessionId
+          ? `/bookings/${booking.id}/checkout?agent_session_id=${encodeURIComponent(agentSessionId)}`
+          : `/bookings/${booking.id}/checkout`,
+      );
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         const conflicting: string[] = (err.body as { detail?: { conflicting_seat_ids?: string[] } })?.detail

@@ -73,6 +73,28 @@ export interface Payment {
   status: string;
 }
 
+export interface AgentExtra {
+  payment_required?: boolean;
+  booking_id?: string;
+  amount?: number;
+  movie?: string;
+  showtime?: string;
+  seats?: string;
+  // Hand-off links from AwaitingBookingState (agent-service) -- never
+  // embedded in `response` text, since the rephrasing LLM call can
+  // mangle unusual strings and a mangled URL is a broken link.
+  seat_selection_url?: string;
+  checkout_url?: string;
+}
+
+export interface AgentMessageResponse {
+  session_id: string;
+  response: string;
+  state: string;
+  options: string[];
+  extra: AgentExtra;
+}
+
 export class ApiError extends Error {
   status: number;
   body: unknown;

@@ -9,10 +9,10 @@ import httpx
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
-from config import AUTH_ENABLED, SERVICE_MAP
+from config import AUTH_ENABLED, CLIENT_TIMEOUT_SECONDS, SERVICE_MAP
 
 app = FastAPI(title="Routing service")
-client = httpx.AsyncClient(timeout=10.0)
+client = httpx.AsyncClient(timeout=CLIENT_TIMEOUT_SECONDS)
 
 # Phase 8: the customer SPA (served from the local CDN mock, a different
 # origin/port than this service) calls through here for every backend

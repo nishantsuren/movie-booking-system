@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
 import { ApiError } from "../types";
 import type { Booking } from "../types";
@@ -29,10 +29,29 @@ function useCountdown(expiresAt: string) {
 export default function CheckoutPage() {
   const { bookingId } = useParams<{ bookingId: string }>();
   const navigate = useNavigate();
+  // Present only when this flow was reached via the agent's chat
+  // hand-off link -- gates the hard-reload return redirect below, so
+  // a customer checking out directly sees zero behavior change.
+  const [searchParams] = useSearchParams();
+  const agentSessionId = searchParams.get("agent_session_id");
 
   const [booking, setBooking] = useState<Booking | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [paying, setPaying] = useState(false);
+
+  // The only way the chat learns a hand-off completed: a *hard*
+  // reload (not navigate()) back into a fresh App.tsx mount, carrying
+  // both the chat session id and the now-known booking id -- App.tsx's
+  // mount-time query parse picks this up and reopens the chat. A plain
+  // navigate() would never trigger that parse on a same-tab SPA
+  // transition. Absent agentSessionId, behavior is exactly as before.
+  function goToConfirmation(id: string) {
+    if (agentSessionId) {
+      window.location.href = `/bookings/${id}/confirmation?agent_session_id=${encodeURIComponent(agentSessionId)}&agent_booking_id=${id}`;
+    } else {
+      navigate(`/bookings/${id}/confirmation`);
+    }
+  }
 
   useEffect(() => {
     if (!bookingId) return;
@@ -40,10 +59,11 @@ export default function CheckoutPage() {
       .getBooking(bookingId)
       .then((result) => {
         setBooking(result);
-        if (result.status === "CONFIRMED") navigate(`/bookings/${result.id}/confirmation`);
+        if (result.status === "CONFIRMED") goToConfirmation(result.id);
       })
       .catch((err) => setError(`Could not load booking: ${err.message}`));
-  }, [bookingId, navigate]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- goToConfirmation closes over agentSessionId/navigate, both stable for this component's lifetime
+  }, [bookingId]);
 
   const { remainingSeconds, pastNominal } = useCountdown(booking?.expires_at ?? new Date().toISOString());
 
@@ -60,7 +80,7 @@ export default function CheckoutPage() {
     try {
       const payment = await api.createPayment(booking.id, booking.price_paid);
       const confirmed = await api.confirmBooking(booking.id, payment.id);
-      navigate(`/bookings/${confirmed.id}/confirmation`);
+      goToConfirmation(confirmed.id);
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
         setError(

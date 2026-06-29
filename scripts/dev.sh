@@ -39,7 +39,7 @@ PID_FILE="logs/dev.pids"
 # 3.2 (GPLv2 licensing freeze), which has no associative arrays at all
 # (bash 4+ only); this needs to run with whatever bash ships on the dev
 # machine, not a Homebrew-installed newer one.
-SERVICE_NAMES="catalog theatre booking payment user local-cdn-mock routing agent"
+SERVICE_NAMES="catalog theatre booking payment user local-cdn-mock routing agent agent-mcp-server"
 
 service_port() {
   case "$1" in
@@ -51,6 +51,7 @@ service_port() {
     local-cdn-mock) echo 8006 ;;
     routing) echo 8000 ;;
     agent) echo 8007 ;;
+    agent-mcp-server) echo 8008 ;;
     *) return 1 ;;
   esac
 }
@@ -223,15 +224,27 @@ cmd_startall() {
   set +a
 
   VENV_DIR=".venv"
+  # The official MCP SDK (agent-mcp-server) requires Python >=3.10 -- pinned to
+  # python3.12 explicitly rather than relying on whatever bare `python3` resolves
+  # to on a given machine, since the system default is commonly still 3.9. Not
+  # 3.14: the mcp package's own dependency spec requires starlette>=0.48.0 only
+  # on Python >=3.14 (starlette>=0.27 otherwise), and 0.48.0 is incompatible with
+  # fastapi==0.115.0 (pinned across every service here, needs starlette<0.39.0) --
+  # staying below 3.14 keeps mcp on its older, fastapi-compatible starlette floor.
+  PYTHON_BIN="python3.12"
+  if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
+    echo "$PYTHON_BIN not found -- install it (e.g. brew install python@3.14) before running this script." >&2
+    exit 1
+  fi
   if [ ! -d "$VENV_DIR" ]; then
-    echo "Creating shared virtualenv at $VENV_DIR..."
-    python3 -m venv "$VENV_DIR"
+    echo "Creating shared virtualenv at $VENV_DIR with $PYTHON_BIN..."
+    "$PYTHON_BIN" -m venv "$VENV_DIR"
   fi
   # shellcheck disable=SC1091
   source "$VENV_DIR/bin/activate"
 
   echo "Installing/updating dependencies for all services..."
-  for svc in services/catalog services/theatre services/booking services/payment services/user local-cdn-mock routing services/agent-service; do
+  for svc in services/catalog services/theatre services/booking services/payment services/user local-cdn-mock routing services/agent-service services/agent-mcp-server; do
     pip install -q -r "$svc/requirements.txt"
   done
 
@@ -328,10 +341,17 @@ cmd_startall() {
     USER_SERVICE_URL="http://localhost:8005" \
     AGENT_SERVICE_URL="http://localhost:8007"
 
+  start_service agent-mcp-server services/agent-mcp-server 8008 \
+    PORT="8008" \
+    BOOKING_PLATFORM_URL="http://localhost:8000" \
+    AGENT_SERVICE_URL="http://localhost:8007"
+
   start_service agent services/agent-service 8007 \
     OLLAMA_URL="http://localhost:11434" \
     OLLAMA_MODEL="llama3.2:3b" \
     BOOKING_PLATFORM_URL="http://localhost:8000" \
+    CUSTOMER_WEB_BASE_URL="http://localhost:8006" \
+    AGENT_MCP_SERVER_URL="http://localhost:8008/mcp" \
     AUTH_ENABLED="$AUTH_ENABLED"
 
   echo ""

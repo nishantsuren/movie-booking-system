@@ -1,6 +1,6 @@
 import { API_BASE_URL } from "../config";
 import { ApiError } from "../types";
-import type { Booking, City, Movie, MovieShowtimesResponse, Payment, Seatmap } from "../types";
+import type { AgentMessageResponse, Booking, City, Movie, MovieShowtimesResponse, Payment, Seatmap } from "../types";
 
 async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
   // Every call goes through the routing service (§3) -- never directly
@@ -43,4 +43,20 @@ export const api = {
 
   confirmBooking: (bookingId: string, paymentId: string) =>
     request<Booking>("POST", `/booking/bookings/${bookingId}/confirm`, { payment_id: paymentId }),
+
+  // selectedOption set means the user clicked one of the previous agent
+  // message's option buttons rather than typing free text -- sent
+  // separately from `message` so the backend can skip NLU entirely and
+  // write the exact clicked value straight into the relevant booking
+  // context slot (deterministic, no LLM call involved). bookingId set
+  // means this call is a returning browser tab reporting a booking
+  // after external seat selection/payment -- also bypasses NLU, read
+  // by AwaitingBookingState only.
+  sendAgentMessage: (sessionId: string, message: string, selectedOption?: string, bookingId?: string) =>
+    request<AgentMessageResponse>("POST", "/agent/message", {
+      session_id: sessionId,
+      message,
+      selected_option: selectedOption ?? null,
+      booking_id: bookingId ?? null,
+    }),
 };
